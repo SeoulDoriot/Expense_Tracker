@@ -1,14 +1,25 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type FormEvent, type ChangeEvent } from "react";
 import { useRouter } from "next/navigation";
+import { createClient } from "@supabase/supabase-js";
 import Image from "next/image";
 import Link from "next/link";
 
-import Divider from "@/components/auth/Divider";
-import SocialIcon from "@/components/auth/Socialicon";
-import Input from "@/components/ui/Input";
-import Button from "@/components/ui/Button";
+// UI components
+import Input from "../../../components/ui/Input";
+import Button from "../../../components/ui/Button";
+import Divider from "../../../components/auth/Divider";
+import SocialIcon from "../../../components/auth/Socialicon";
+
+// Browser Supabase client (uses anon key)
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+const supabase =
+  supabaseUrl && supabaseAnonKey
+    ? createClient(supabaseUrl, supabaseAnonKey)
+    : null;
 
 function EyeOffIcon() {
   return (
@@ -37,7 +48,6 @@ function EyeOffIcon() {
 }
 
 export default function SignupPage() {
-  const [role, setRole] = useState<"student" | "teacher" | "">("");
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -57,13 +67,13 @@ export default function SignupPage() {
 
   const router = useRouter();
 
-  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setErrorMsg(null);
 
-    if (!fullName.trim() || !email.trim() || !password || !repeatPassword || !role) {
+    if (!fullName.trim() || !email.trim() || !password || !repeatPassword) {
       triggerShake();
-      return setErrorMsg("Please fill all fields and select a role.");
+      return setErrorMsg("Please fill all fields.");
     }
 
     if (password !== repeatPassword) {
@@ -74,24 +84,33 @@ export default function SignupPage() {
     try {
       setLoading(true);
 
-      const res = await fetch("/api/signup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fullName, email, password, role }),
-      });
-
-      const data = await res.json().catch(() => ({}));
-
-      if (!res.ok) {
+      if (!supabase) {
         triggerShake();
-        return setErrorMsg((data as any)?.error || "Signup failed.");
+        return setErrorMsg(
+          "Missing Supabase env. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local, then restart npm run dev."
+        );
       }
 
-      // If you enabled email confirmation in Supabase Auth,
-      // the API may return needsEmailConfirmation=true.
-      if ((data as any)?.needsEmailConfirmation) {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: { full_name: fullName },
+        },
+      });
+
+      if (error) {
         triggerShake();
-        return setErrorMsg("Account created. Please check your email to confirm, then login.");
+        return setErrorMsg(error.message || "Signup failed.");
+      }
+
+      // If email confirmations are ON, Supabase creates the user but needs confirmation.
+      // In that case, user may be null until confirmed.
+      if (!data.user) {
+        triggerShake();
+        return setErrorMsg(
+          "Account created. Please check your email to confirm, then login."
+        );
       }
 
       router.push("/Log_in");
@@ -102,21 +121,12 @@ export default function SignupPage() {
       setLoading(false);
     }
   }
+  
 
   return (
     <div className="min-h-screen bg-[#fbfbfb] flex items-center">
       <div className="mx-auto grid max-w-6xl grid-cols-1 gap-8 px-6 py-8 lg:grid-cols-2 lg:items-center w-full">
         {/* KIT logo top-left */}
-        <div className="lg:col-span-2 mb-4">
-          <Image
-            src="/logo.png"
-            alt="Smart Expense"
-            width={200}
-            height={80}
-            priority
-            className="rounded-2xl object-contain shadow-[0_10px_30px_rgba(15,23,42,0.06)]"
-          />
-        </div>
 
         {/* Title */}
         <div className="lg:col-span-2 mb-2">
@@ -129,24 +139,22 @@ export default function SignupPage() {
             placeholder="Full name"
             type="text"
             value={fullName}
-            onChange={(e: any) => setFullName(e.target.value)}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setFullName(e.target.value)}
           />
 
-          {/* Role Selection */}
-          
 
           <Input
             placeholder="Email"
             type="email"
             value={email}
-            onChange={(e: any) => setEmail(e.target.value)}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setEmail(e.target.value)}
           />
 
           <Input
             placeholder="Password"
             type="password"
             value={password}
-            onChange={(e: any) => setPassword(e.target.value)}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setPassword(e.target.value)}
             rightIcon={<EyeOffIcon />}
           />
 
@@ -154,7 +162,7 @@ export default function SignupPage() {
             placeholder="Repeat Password"
             type="password"
             value={repeatPassword}
-            onChange={(e: any) => setRepeatPassword(e.target.value)}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setRepeatPassword(e.target.value)}
             rightIcon={<EyeOffIcon />}
           />
 
@@ -197,13 +205,13 @@ export default function SignupPage() {
         {/* Right: Image (cannot block clicks) */}
         <div className="relative hidden lg:flex w-full justify-end items-center pointer-events-none">
           <div className="relative h-[520px] w-[520px]">
-            <div className="absolute -right-10 bottom-10 h-[600px] w-[380px] rounded-full bg-[#E5E5E5]" />
+            <div className="absolute -right-10 bottom-[-220] h-[900px] w-[400px] rounded-full bg-[#E5E5E5]" />
             <div
               className="absolute right-0 top-0 overflow-hidden rounded-3xl"
               style={{ transform: "translateY(-40px)" }}
             >
               <Image
-                src="/student.png"
+                src="/student2.png"
                 alt="student"
                 width={720}
                 height={760}
