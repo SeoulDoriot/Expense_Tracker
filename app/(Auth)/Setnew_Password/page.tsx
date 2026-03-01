@@ -1,35 +1,94 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/src/lib/supabaseClient";
 
-export default function ForgotPasswordPage() {
-  const [email, setEmail] = useState("");
+function getTokensFromHash() {
+  if (typeof window === "undefined") return null;
+  const hash = window.location.hash; // like: #access_token=...&refresh_token=...
+  if (!hash || !hash.includes("access_token")) return null;
+
+  const params = new URLSearchParams(hash.replace("#", ""));
+  const access_token = params.get("access_token");
+  const refresh_token = params.get("refresh_token");
+
+  if (!access_token || !refresh_token) return null;
+  return { access_token, refresh_token };
+}
+
+export default function SetNewPasswordPage() {
+  const router = useRouter();
+
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string>("");
+  const [ready, setReady] = useState(false);
 
-  async function handleSendReset() {
-    const cleanEmail = email.trim().toLowerCase();
-    if (!cleanEmail) {
-      setMessage("Please enter your email.");
+  // Ensure we have a recovery session from the email link
+  useEffect(() => {
+    let mounted = true;
+
+    async function init() {
+      setMessage("");
+      // 1) Try normal session
+      const { data } = await supabase.auth.getSession();
+      if (data.session) {
+        if (mounted) setReady(true);
+        return;
+      }
+
+      // 2) If not, try to read tokens from URL hash and set session
+      const tokens = getTokensFromHash();
+      if (tokens) {
+        const { error } = await supabase.auth.setSession(tokens);
+        if (error) {
+          if (mounted) {
+            setReady(false);
+            setMessage(
+              "Session missing. Please open the reset link from your email again (it may have expired)."
+            );
+          }
+          return;
+        }
+        if (mounted) setReady(true);
+        return;
+      }
+
+      // 3) No session and no tokens => user opened page directly
+      if (mounted) {
+        setReady(false);
+        setMessage(
+          "Session missing. Please open the reset link from your email again (it may have expired)."
+        );
+      }
+    }
+
+    void init();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  async function handleUpdatePassword() {
+    if (!ready) return;
+
+    if (password.length < 6) {
+      setMessage("Password must be at least 6 characters.");
+      return;
+    }
+    if (password !== confirm) {
+      setMessage("Passwords do not match.");
       return;
     }
 
     setLoading(true);
     setMessage("");
 
-    // Where Supabase will redirect after user clicks the reset link in email
-    // You MUST create this page later: /update-password
-    const redirectTo =
-      typeof window !== "undefined"
-        ? `${window.location.origin}/update-password`
-        : undefined;
-
-    const { error } = await supabase.auth.resetPasswordForEmail(cleanEmail, {
-      redirectTo,
-    });
+    const { error } = await supabase.auth.updateUser({ password });
 
     if (error) {
       setMessage(error.message);
@@ -37,8 +96,11 @@ export default function ForgotPasswordPage() {
       return;
     }
 
-    setMessage("Reset link sent. Please check your email.");
+    setMessage("Password updated successfully. Redirecting...");
     setLoading(false);
+
+    // Optional: go to login page
+    setTimeout(() => router.push("/Log_in"), 800);
   }
 
   return (
@@ -49,38 +111,51 @@ export default function ForgotPasswordPage() {
           <section className="flex justify-center lg:justify-start">
             <div className="flex w-full max-w-[520px] min-h-[560px] flex-col rounded-3xl bg-white px-10 py-14 md:px-12 shadow-[0_30px_90px_rgba(0,0,0,0.12)] ring-1 ring-zinc-100">
               <h1 className="text-center text-4xl font-semibold text-zinc-900">
-                Forgot password
+                Set new password
               </h1>
 
               <div className="mt-5 text-center text-sm text-zinc-400">
-                Enter your email and we’ll send you a reset link.
+                Enter your new password below.
               </div>
 
               <div className="mt-10 space-y-4">
                 <div className="space-y-2">
-                  <p className="text-xs font-medium text-zinc-600">Email</p>
+                  <p className="text-xs font-medium text-zinc-600">New password</p>
                   <input
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="Email & Phone number"
-                    type="email"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="New password"
+                    type="password"
+                    className="h-12 w-full rounded-full border border-zinc-200 bg-white px-5 text-sm text-zinc-900 outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-zinc-600">
+                    Confirm password
+                  </p>
+                  <input
+                    value={confirm}
+                    onChange={(e) => setConfirm(e.target.value)}
+                    placeholder="Confirm password"
+                    type="password"
                     className="h-12 w-full rounded-full border border-zinc-200 bg-white px-5 text-sm text-zinc-900 outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10"
                   />
                 </div>
 
                 <button
                   type="button"
-                  onClick={handleSendReset}
-                  disabled={loading}
+                  onClick={handleUpdatePassword}
+                  disabled={loading || !ready}
                   className="mt-3 h-11 w-full rounded-full bg-zinc-900 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {loading ? "Sending..." : "Send reset link"}
+                  {loading ? "Updating..." : "Update password"}
                 </button>
 
                 {message && (
                   <p
                     className={`mt-3 text-center text-sm ${
-                      message.toLowerCase().includes("sent")
+                      message.toLowerCase().includes("success")
                         ? "text-emerald-600"
                         : "text-red-500"
                     }`}
@@ -90,7 +165,7 @@ export default function ForgotPasswordPage() {
                 )}
 
                 <div className="mt-8 flex items-center justify-center gap-2 text-xs text-zinc-400">
-                  <span>Remember your password?</span>
+                  <span>Back to</span>
                   <Link
                     href="/Log_in"
                     className="font-semibold underline underline-offset-2 hover:text-zinc-600"
@@ -102,12 +177,10 @@ export default function ForgotPasswordPage() {
             </div>
           </section>
 
-          {/* Right Illustration (same style as your OTP page) */}
+          {/* Right Illustration */}
           <section className="relative flex justify-center">
             <div className="relative hidden min-h-[700px] bottom-20 justify-end items-end lg:flex">
-              {/* Big circle background */}
               <div className="absolute -right-10 bottom-0 h-[600px] w-[380px] rounded-full bg-[#E5E5E5] -translate-y-6" />
-
               <Image
                 src="/student.png"
                 alt="Student"
