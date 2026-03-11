@@ -2,24 +2,17 @@
 
 import { useState, type FormEvent, type ChangeEvent } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@supabase/supabase-js";
-import Image from "next/image";
 import Link from "next/link";
 
 // UI components
 import Input from "../../../components/ui/Input";
 import Button from "../../../components/ui/Button";
 import Divider from "../../../components/auth/Divider";
+import AuthStudentIllustration from "@/components/auth/AuthStudentIllustration";
 import SocialIcon from "../../../components/auth/Socialicon";
-
-// Browser Supabase client (uses anon key)
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-const supabase =
-  supabaseUrl && supabaseAnonKey
-    ? createClient(supabaseUrl, supabaseAnonKey)
-    : null;
+import { AUTH_ROUTES, storePendingSignup } from "@/src/lib/authFlow";
+import { toFriendlyAuthMessage } from "@/src/lib/authMessages";
+import { signInWithSocialProvider, type SocialProvider } from "@/src/lib/socialAuth";
 
 function EyeOffIcon() {
   return (
@@ -53,7 +46,9 @@ export default function SignupPage() {
   const [password, setPassword] = useState("");
   const [repeatPassword, setRepeatPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [socialLoading, setSocialLoading] = useState<SocialProvider | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [shake, setShake] = useState(false);
 
   function triggerShake() {
@@ -81,39 +76,42 @@ export default function SignupPage() {
       return setErrorMsg("Passwords do not match.");
     }
 
+    if (!acceptedTerms) {
+      triggerShake();
+      return setErrorMsg("Please accept the terms and privacy policy.");
+    }
+
     try {
       setLoading(true);
-
-      if (!supabase) {
-        triggerShake();
-        return setErrorMsg(
-          "Missing Supabase env. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in .env.local, then restart npm run dev."
-        );
-      }
-
-      const { data, error } = await supabase.auth.signUp({
-        email,
-        password,
-        options: {
-          data: { full_name: fullName },
+      const response = await fetch("/api/auth/signup", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
         },
+        body: JSON.stringify({
+          fullName: fullName.trim(),
+          email: email.trim().toLowerCase(),
+          password,
+        }),
       });
+      const result = (await response.json()) as {
+        success: boolean;
+        message: string;
+      };
 
-      if (error) {
-        triggerShake();
-        return setErrorMsg(error.message || "Signup failed.");
-      }
-
-      // If email confirmations are ON, Supabase creates the user but needs confirmation.
-      // In that case, user may be null until confirmed.
-      if (!data.user) {
+      if (!response.ok || !result.success) {
         triggerShake();
         return setErrorMsg(
-          "Account created. Please check your email to confirm, then login."
+          toFriendlyAuthMessage(result.message || "Unable to create your account.")
         );
       }
 
-      router.push("/Log_in");
+      storePendingSignup({
+        email: email.trim().toLowerCase(),
+        fullName: fullName.trim(),
+        password,
+      });
+      router.push(`${AUTH_ROUTES.otpVerify}?email=${encodeURIComponent(email.trim().toLowerCase())}&type=signup`);
     } catch {
       triggerShake();
       setErrorMsg("Something went wrong.");
@@ -121,20 +119,34 @@ export default function SignupPage() {
       setLoading(false);
     }
   }
+
+  async function handleSocialSignup(provider: SocialProvider) {
+    setErrorMsg(null);
+    setSocialLoading(provider);
+
+    try {
+      await signInWithSocialProvider(provider);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to continue with social sign-in.";
+      setErrorMsg(toFriendlyAuthMessage(message));
+      setSocialLoading(null);
+    }
+  }
   
 
   return (
-    <div className="min-h-screen bg-[#fbfbfb] flex items-center">
-      <div className="mx-auto grid max-w-6xl grid-cols-1 gap-8 px-6 py-8 lg:grid-cols-2 lg:items-center w-full">
+    <div className="min-h-screen bg-transparent flex items-center">
+      <div className="auth-stage mx-auto grid max-w-6xl grid-cols-1 gap-8 px-6 py-8 lg:grid-cols-2 lg:items-center w-full">
         {/* KIT logo top-left */}
 
         {/* Title */}
-        <div className="lg:col-span-2 mb-2">
+        <div className="auth-reveal auth-delay-1 lg:col-span-2 mb-2">
           <h1 className="text-3xl font-semibold text-black">Registration</h1>
         </div>
 
         {/* Left: Form */}
-        <form onSubmit={handleSubmit} className="relative z-20 mt-2 space-y-5">
+        <form onSubmit={handleSubmit} className="auth-reveal-left auth-delay-2 auth-form-stack relative z-20 mt-2 space-y-5">
           <Input
             placeholder="Full name"
             type="text"
@@ -168,7 +180,12 @@ export default function SignupPage() {
 
           {/* Checkbox row */}
           <label className="flex items-center gap-3 pt-1 text-xs text-zinc-700">
-            <input type="checkbox" className="h-4 w-4 accent-black" />
+            <input
+              type="checkbox"
+              checked={acceptedTerms}
+              onChange={(e) => setAcceptedTerms(e.target.checked)}
+              className="h-4 w-4 accent-black"
+            />
             <span>I accept the terms and privacy policy</span>
           </label>
 
@@ -190,37 +207,36 @@ export default function SignupPage() {
           <p className="text-center text-[11px] text-zinc-400">Continue with :</p>
 
           <div className="flex items-center justify-center gap-6">
-            <SocialIcon src="/google.png" alt="Google" />
-            <SocialIcon src="/apple.png" alt="Apple" />
+            <SocialIcon
+              src="/google.png"
+              alt="Google"
+              onClick={() => void handleSocialSignup("google")}
+              disabled={socialLoading !== null}
+            />
+            <SocialIcon
+              src="/apple.png"
+              alt="Apple"
+              onClick={() => void handleSocialSignup("apple")}
+              disabled={socialLoading !== null}
+            />
           </div>
+
+          {socialLoading ? (
+            <p className="text-center text-[11px] text-zinc-500">
+              Redirecting to {socialLoading === "google" ? "Google" : "Apple"}...
+            </p>
+          ) : null}
 
           <p className="pt-2 text-center text-xs text-zinc-500">
             Already have an account?{" "}
-            <Link href="/Log_in" className="font-semibold text-black underline">
+            <Link href={AUTH_ROUTES.login} className="font-semibold text-black underline">
               Login
             </Link>
           </p>
         </form>
 
         {/* Right: Image (cannot block clicks) */}
-        <div className="relative hidden lg:flex w-full justify-end items-center pointer-events-none">
-          <div className="relative h-[520px] w-[520px]">
-            <div className="absolute -right-10 bottom-[-220] h-[900px] w-[400px] rounded-full bg-[#E5E5E5]" />
-            <div
-              className="absolute right-0 top-0 overflow-hidden rounded-3xl"
-              style={{ transform: "translateY(-40px)" }}
-            >
-              <Image
-                src="/student2.png"
-                alt="student"
-                width={720}
-                height={760}
-                className="object-contain rounded-3xl"
-                priority
-              />
-            </div>
-          </div>
-        </div>
+        <AuthStudentIllustration />
       </div>
       <style jsx global>{`
         @keyframes seoul-shake {

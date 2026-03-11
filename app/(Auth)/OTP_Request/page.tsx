@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { supabase } from "@/src/lib/supabaseClient";
+import { AUTH_ROUTES } from "@/src/lib/authFlow";
+import { getSupabaseBrowserClient } from "@/src/lib/supabaseBrowser";
 
 export default function OtpRequestPage() {
   const [email, setEmail] = useState("");
@@ -21,6 +22,13 @@ export default function OtpRequestPage() {
     return;
   }
 
+  const supabase = getSupabaseBrowserClient();
+  if (!supabase) {
+    setMsg("Supabase keys are missing. Please configure your environment variables.");
+    setLoading(false);
+    return;
+  }
+
   const { error } = await supabase.auth.signInWithOtp({
     email,
     options: {
@@ -32,7 +40,7 @@ export default function OtpRequestPage() {
 
   if (error) return setMsg(error.message);
 
-  router.push(`/otp-verify?email=${encodeURIComponent(email)}&mode=signup`);
+  router.push(`${AUTH_ROUTES.otpVerify}?email=${encodeURIComponent(email)}&type=signup`);
 }
 
   return (

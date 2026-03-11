@@ -8,7 +8,6 @@ export type DbTransaction = {
   category: string | null;
   note: string | null;
   amount: number;
-  currency: string;
   occurred_on: string; // yyyy-mm-dd
   created_at: string;
 };
@@ -16,11 +15,13 @@ export type DbTransaction = {
 export async function getRecentTransactions(limit = 5) {
   const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
   if (sessionErr) throw sessionErr;
-  if (!sessionData.session?.user) throw new Error("Not logged in.");
+  const user = sessionData.session?.user;
+  if (!user) throw new Error("Not logged in.");
 
   const { data, error } = await supabase
     .from("transactions")
     .select("*")
+    .eq("user_id", user.id)
     .order("occurred_on", { ascending: false })
     .order("created_at", { ascending: false })
     .limit(limit);
@@ -35,7 +36,6 @@ export type NewTransactionInput = {
   category?: string | null;
   note?: string | null;
   amount: number;
-  currency?: string;
   occurred_on: string; // yyyy-mm-dd
 };
 
@@ -53,7 +53,6 @@ export async function createTransaction(input: NewTransactionInput) {
     category: input.category ?? null,
     note: input.note ?? null,
     amount: input.amount,
-    currency: input.currency ?? "USD",
     occurred_on: input.occurred_on,
   };
 
@@ -70,11 +69,13 @@ export async function createTransaction(input: NewTransactionInput) {
 export async function listTransactions(limit = 50) {
   const { data: sessionData, error: sessionErr } = await supabase.auth.getSession();
   if (sessionErr) throw sessionErr;
-  if (!sessionData.session?.user) throw new Error("Not logged in.");
+  const user = sessionData.session?.user;
+  if (!user) throw new Error("Not logged in.");
 
   const { data, error } = await supabase
     .from("transactions")
     .select("*")
+    .eq("user_id", user.id)
     .order("occurred_on", { ascending: false })
     .order("created_at", { ascending: false })
     .limit(limit);

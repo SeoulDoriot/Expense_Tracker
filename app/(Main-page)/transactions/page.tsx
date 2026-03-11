@@ -1,6 +1,18 @@
 "use client";
-import { supabase } from "@/src/lib/supabaseClient";
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { createTransaction, listTransactions, type DbTransaction } from "@/src/db/transactions";
+import { readStoredJson, removeStoredValue, writeStoredJson } from "@/src/lib/browserStorage";
+import {
+  convertCurrencyToUsd,
+  formatAppCurrency,
+  getCurrencyCode,
+} from "@/src/lib/appPreferences";
+import { useAppPreferences } from "@/src/hooks/useAppPreferences";
+import {
+  getTransactionCategories,
+  isValidTransactionCategory,
+} from "@/src/lib/transactionCategories";
 
 type TxType = "Income" | "Expense";
 type TimeRange = "this_month" | "last_month";
@@ -14,6 +26,17 @@ type Transaction = {
   occurred_on: string; // YYYY-MM-DD
   note?: string;
 };
+
+type TransactionDraft = {
+  formType: TxType;
+  formTitle: string;
+  formCategory: string;
+  formAmount: string;
+  formDate: string;
+  formNote: string;
+};
+
+const TRANSACTION_DRAFT_KEY = "transactions-page-draft";
 
 function cn(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
@@ -69,12 +92,6 @@ function toYYYYMMDD(d: Date) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
-function daysAgo(n: number) {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return toYYYYMMDD(d);
-}
-
 function parseDateYYYYMMDD(s: string) {
   const [y, m, d] = s.split("-").map(Number);
   return new Date(y, (m || 1) - 1, d || 1);
@@ -93,11 +110,24 @@ function isInLastMonth(dateStr: string) {
   return d.getFullYear() === last.getFullYear() && d.getMonth() === last.getMonth();
 }
 
-function AmountPill({ type, amount }: { type: TxType; amount: number }) {
-  const sign = type === "Income" ? "+" : "-";
+function AmountPill({
+  type,
+  amount,
+  currency,
+  language,
+}: {
+  type: TxType;
+  amount: number;
+  currency: "USD" | "KHR";
+  language: "en" | "km";
+}) {
+  const signedAmount = type === "Income" ? amount : -amount;
   return (
     <span className={cn("text-sm font-semibold", type === "Income" ? "text-emerald-600" : "text-red-500")}>
-      {sign}${amount.toLocaleString()}
+      {formatAppCurrency(signedAmount, currency, language, {
+        signed: true,
+        maximumFractionDigits: currency === "KHR" ? 0 : 2,
+      })}
     </span>
   );
 }
@@ -116,49 +146,51 @@ function TypeChip({ type }: { type: TxType }) {
 }
 
 export default function TransactionsPage() {
+  const router = useRouter();
+  const { settings } = useAppPreferences();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saveLoading, setSaveLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [draftReady, setDraftReady] = useState(false);
+
+  function mapDbTransaction(row: DbTransaction): Transaction {
+    return {
+      id: String(row.id),
+      type: row.type === "income" ? "Income" : "Expense",
+      title: String(row.title ?? ""),
+      category: String(row.category ?? "General"),
+      amount: typeof row.amount === "number" ? row.amount : Number(row.amount ?? 0),
+      occurred_on:
+        typeof row.occurred_on === "string"
+          ? row.occurred_on
+          : String(row.occurred_on ?? ""),
+      note: row.note ?? undefined,
+    };
+  }
+
+  async function loadTransactions() {
+    setLoading(true);
+    setErrorMsg(null);
+
+    try {
+      const data = await listTransactions(200);
+      setTransactions(data.map(mapDbTransaction));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to load transactions.";
+      setErrorMsg(message);
+
+      if (message === "Not logged in.") {
+        router.push("/Log_in");
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
-    let isMounted = true;
-
-    async function loadTransactions() {
-      const { data, error } = await supabase
-        .from("transactions")
-        .select("id,type,title,category,amount,occurred_on,note")
-        .order("occurred_on", { ascending: false });
-
-      if (error) {
-        console.error("Failed to load transactions:", error.message);
-        return;
-      }
-
-      if (!isMounted) return;
-
-      // Supabase can return `occurred_on` as a Date or string depending on settings.
-      const normalized: Transaction[] = (data ?? []).map((row: any) => ({
-        id: String(row.id),
-        type: row.type as TxType,
-        title: String(row.title ?? ""),
-        category: String(row.category ?? ""),
-        amount: typeof row.amount === "number" ? row.amount : Number(row.amount ?? 0),
-        occurred_on:
-          typeof row.occurred_on === "string"
-            ? row.occurred_on
-            : row.occurred_on instanceof Date
-              ? row.occurred_on.toISOString().slice(0, 10)
-              : String(row.occurred_on ?? ""),
-        note: row.note ?? undefined,
-      }));
-
-      setTransactions(normalized);
-    }
-
-    loadTransactions();
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+    void loadTransactions();
+  }, [router]);
 
   const [filterType, setFilterType] = useState<"all" | TxType>("all");
   const [range, setRange] = useState<TimeRange>("this_month");
@@ -171,6 +203,47 @@ export default function TransactionsPage() {
   const [formAmount, setFormAmount] = useState("0.00");
   const [formDate, setFormDate] = useState(toYYYYMMDD(new Date()));
   const [formNote, setFormNote] = useState("");
+  const categoryOptions = useMemo(() => getTransactionCategories(formType), [formType]);
+
+  useEffect(() => {
+    const draft = readStoredJson<TransactionDraft>(TRANSACTION_DRAFT_KEY);
+
+    if (draft) {
+      setFormType(draft.formType ?? "Expense");
+      setFormTitle(draft.formTitle ?? "");
+      setFormCategory(draft.formCategory ?? "");
+      setFormAmount(draft.formAmount ?? "0.00");
+      setFormDate(draft.formDate ?? toYYYYMMDD(new Date()));
+      setFormNote(draft.formNote ?? "");
+    }
+
+    setDraftReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!draftReady) {
+      return;
+    }
+
+    writeStoredJson<TransactionDraft>(TRANSACTION_DRAFT_KEY, {
+      formType,
+      formTitle,
+      formCategory,
+      formAmount,
+      formDate,
+      formNote,
+    });
+  }, [draftReady, formAmount, formCategory, formDate, formNote, formTitle, formType]);
+
+  useEffect(() => {
+    if (!formCategory) {
+      return;
+    }
+
+    if (!isValidTransactionCategory(formType, formCategory)) {
+      setFormCategory("");
+    }
+  }, [formCategory, formType]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -190,39 +263,62 @@ export default function TransactionsPage() {
   }, [transactions, filterType, range, search]);
 
   function openAddModal() {
+    setOpen(true);
+  }
+
+  function resetForm() {
     setFormType("Expense");
     setFormTitle("");
     setFormCategory("");
     setFormAmount("0.00");
     setFormDate(toYYYYMMDD(new Date()));
     setFormNote("");
-    setOpen(true);
+    removeStoredValue(TRANSACTION_DRAFT_KEY);
   }
 
-  function addTransaction() {
+  async function addTransaction() {
     const amt = Number(formAmount);
 
-    if (!formTitle.trim()) return;
-    if (!formCategory.trim()) return;
-    if (!formDate.trim()) return;
-    if (!Number.isFinite(amt) || amt <= 0) return;
+    if (!formTitle.trim() || !formCategory.trim() || !formDate.trim()) {
+      setErrorMsg("Please fill in title, category, and date.");
+      return;
+    }
 
-    const tx: Transaction = {
-      id: crypto.randomUUID(),
-      type: formType,
-      title: formTitle.trim(),
-      category: formCategory.trim(),
-      amount: Math.round(amt * 100) / 100,
-      occurred_on: formDate,
-      note: formNote.trim() ? formNote.trim() : undefined,
-    };
+    if (!Number.isFinite(amt) || amt <= 0) {
+      setErrorMsg("Amount must be greater than 0.");
+      return;
+    }
 
-    setTransactions((prev) => [tx, ...prev]);
-    setOpen(false);
+    setSaveLoading(true);
+    setErrorMsg(null);
+
+    try {
+      const created = await createTransaction({
+        title: formTitle.trim(),
+        type: formType === "Income" ? "income" : "expense",
+        category: formCategory.trim(),
+        amount: Math.round(convertCurrencyToUsd(amt, settings.currency) * 100) / 100,
+        occurred_on: formDate,
+        note: formNote.trim() ? formNote.trim() : null,
+      });
+
+      setTransactions((prev) => [mapDbTransaction(created), ...prev]);
+      resetForm();
+      setOpen(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to save transaction.";
+      setErrorMsg(message);
+
+      if (message === "Not logged in.") {
+        router.push("/Log_in");
+      }
+    } finally {
+      setSaveLoading(false);
+    }
   }
 
     return (
-    <div className="min-h-screen bg-[#F3F4F6]">
+    <div className="min-h-screen bg-transparent">
       <style jsx global>{`
         @media (prefers-reduced-motion: reduce) {
           .motion-safe-anim { animation: none !important; transition: none !important; }
@@ -318,7 +414,11 @@ export default function TransactionsPage() {
 
             {/* Rows */}
             <div className="mt-3 flex-1 space-y-3 overflow-auto pr-1">
-              {filtered.length === 0 ? (
+              {loading ? (
+                <div className="motion-safe-anim fade-up d3 flex-1 rounded-2xl border border-zinc-100 bg-zinc-50 px-4 py-14 text-center text-sm text-zinc-500 flex items-center justify-center">
+                  Loading transactions...
+                </div>
+              ) : filtered.length === 0 ? (
                 <div className="motion-safe-anim fade-up d3 flex-1 rounded-2xl border border-zinc-100 bg-zinc-50 px-4 py-14 text-center text-sm text-zinc-500 flex items-center justify-center">
                   No transactions found for this filter.
                 </div>
@@ -355,7 +455,12 @@ export default function TransactionsPage() {
                       </div>
 
                       <div className="text-right">
-                        <AmountPill type={t.type} amount={t.amount} />
+                        <AmountPill
+                          type={t.type}
+                          amount={t.amount}
+                          currency={settings.currency}
+                          language={settings.language}
+                        />
                       </div>
 
                       <div className="hidden sm:block text-right">
@@ -386,6 +491,7 @@ export default function TransactionsPage() {
                 </div>
 
                 <p className="mt-1 text-xs text-zinc-500">Cash out = Expense, cash in = Income.</p>
+                {errorMsg ? <p className="mt-3 text-sm text-rose-600">{errorMsg}</p> : null}
 
                 <div className="mt-4 grid grid-cols-1 gap-4">
                   <div>
@@ -420,20 +526,19 @@ export default function TransactionsPage() {
                       <option value="" disabled>
                         Select category
                       </option>
-                      <option value="Food">Food</option>
-                      <option value="Transport">Transport</option>
-                      <option value="Utilities">Utilities</option>
-                      <option value="Shopping">Shopping</option>
-                      <option value="Entertainment">Entertainment</option>
-                      <option value="Job">Job</option>
-                      <option value="Side Job">Side Job</option>
-                      <option value="Other">Other</option>
+                      {categoryOptions.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
                     </select>
                   </div>
 
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     <div>
-                      <label className="text-[11px] font-semibold text-zinc-600">Amount ($)</label>
+                      <label className="text-[11px] font-semibold text-zinc-600">
+                        Amount ({getCurrencyCode(settings.currency)})
+                      </label>
                       <input
                         value={formAmount}
                         onChange={(e) => setFormAmount(e.target.value)}
@@ -465,9 +570,10 @@ export default function TransactionsPage() {
 
                   <button
                     onClick={addTransaction}
+                    disabled={saveLoading}
                     className="mt-1 h-10 w-full rounded-xl bg-[#111827] text-white text-sm font-semibold hover:bg-[#1F2937] transition"
                   >
-                    Save Transaction
+                    {saveLoading ? "Saving..." : "Save Transaction"}
                   </button>
                 </div>
               </Card>

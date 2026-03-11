@@ -2,6 +2,12 @@
 
 import { supabase } from "@/src/lib/supabaseClient";
 import { useEffect, useMemo, useState } from "react";
+import {
+  formatAppCurrency,
+  type AppCurrency,
+  type AppLanguage,
+} from "@/src/lib/appPreferences";
+import { useAppPreferences } from "@/src/hooks/useAppPreferences";
 
 type TxType = "Income" | "Expense";
 
@@ -43,8 +49,14 @@ function monthKey(d: Date) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
 }
 
-function formatMoney(n: number) {
-  return `$${Math.round(n).toLocaleString()}`;
+function normalizeTransactionType(value: unknown): TxType {
+  return String(value).toLowerCase() === "income" ? "Income" : "Expense";
+}
+
+function formatMoney(n: number, currency: AppCurrency, language: AppLanguage) {
+  return formatAppCurrency(n, currency, language, {
+    maximumFractionDigits: currency === "KHR" ? 0 : 2,
+  });
 }
 
 /* ---------- tiny icons (no external lib) ---------- */
@@ -120,11 +132,15 @@ function BarCompareChart({
   subtitle,
   income,
   expense,
+  currency,
+  language,
 }: {
   title: string;
   subtitle: string;
   income: number;
   expense: number;
+  currency: AppCurrency;
+  language: AppLanguage;
 }) {
   const max = Math.max(income, expense, 1);
 
@@ -154,10 +170,10 @@ function BarCompareChart({
             </text>
 
             <text x="125" y={Math.max(28, 200 - incomeH - 10)} textAnchor="middle" fontSize="12" fill="#065F46">
-              {formatMoney(income)}
+              {formatMoney(income, currency, language)}
             </text>
             <text x="235" y={Math.max(28, 200 - expenseH - 10)} textAnchor="middle" fontSize="12" fill="#7F1D1D">
-              {formatMoney(expense)}
+              {formatMoney(expense, currency, language)}
             </text>
           </svg>
         </div>
@@ -282,6 +298,7 @@ function StatCard({
 }
 
 export default function ReportPage() {
+  const { settings } = useAppPreferences();
   const [tx, setTx] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [infoOpen, setInfoOpen] = useState<null | "net" | "income" | "expense" | "rate">(null);
@@ -319,7 +336,7 @@ export default function ReportPage() {
       const normalized: Transaction[] = (data ?? []).map((row: any) => ({
         id: String(row.id),
         user_id: row.user_id ? String(row.user_id) : undefined,
-        type: row.type as TxType,
+        type: normalizeTransactionType(row.type),
         title: String(row.title ?? ""),
         category: String(row.category ?? ""),
         amount: typeof row.amount === "number" ? row.amount : Number(row.amount ?? 0),
@@ -398,7 +415,7 @@ export default function ReportPage() {
   }, [tx, thisMonthKey]);
 
   return (
-    <div className="min-h-screen bg-[#F3F4F6]">
+    <div className="min-h-screen bg-transparent">
       {/* no navbar here (your layout already has it) */}
       <style jsx global>{`
         @media (prefers-reduced-motion: reduce) {
@@ -447,7 +464,7 @@ export default function ReportPage() {
             <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
               <StatCard
                 title="Net Worth"
-                value={loading ? "—" : formatMoney(computed.netWorth)}
+                value={loading ? "—" : formatMoney(computed.netWorth, settings.currency, settings.language)}
                 sub="All-time balance overview"
                 icon={<IconWallet />}
                 tone="neutral"
@@ -455,7 +472,7 @@ export default function ReportPage() {
               />
               <StatCard
                 title="Monthly Income"
-                value={loading ? "—" : formatMoney(computed.monthIncome)}
+                value={loading ? "—" : formatMoney(computed.monthIncome, settings.currency, settings.language)}
                 sub="Total income this month"
                 icon={<IconUp />}
                 tone="income"
@@ -463,7 +480,7 @@ export default function ReportPage() {
               />
               <StatCard
                 title="Monthly Expense"
-                value={loading ? "—" : formatMoney(computed.monthExpense)}
+                value={loading ? "—" : formatMoney(computed.monthExpense, settings.currency, settings.language)}
                 sub="Total spending this month"
                 icon={<IconDown />}
                 tone="expense"
@@ -488,6 +505,8 @@ export default function ReportPage() {
                 subtitle="Compare your monthly financial flow"
                 income={computed.monthIncome}
                 expense={computed.monthExpense}
+                currency={settings.currency}
+                language={settings.language}
               />
 
               <LineTrendChart title="30-Day Spending Trend" subtitle="Your daily expense activity" points={computed.trend} />

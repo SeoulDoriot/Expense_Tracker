@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { supabase } from "@/src/lib/supabaseClient";
+import AuthStudentIllustration from "@/components/auth/AuthStudentIllustration";
+import { AUTH_ROUTES } from "@/src/lib/authFlow";
+import { getSupabaseBrowserClient } from "@/src/lib/supabaseBrowser";
 
 function getTokensFromHash() {
   if (typeof window === "undefined") return null;
@@ -34,6 +35,14 @@ export default function SetNewPasswordPage() {
 
     async function init() {
       setMessage("");
+      const supabase = getSupabaseBrowserClient();
+      if (!supabase) {
+        if (mounted) {
+          setMessage("Supabase keys are missing. Please configure your environment variables.");
+        }
+        return;
+      }
+
       // 1) Try normal session
       const { data } = await supabase.auth.getSession();
       if (data.session) {
@@ -41,7 +50,27 @@ export default function SetNewPasswordPage() {
         return;
       }
 
-      // 2) If not, try to read tokens from URL hash and set session
+      // 2) App Router recovery links can include an auth code in the query string.
+      const code =
+        typeof window !== "undefined"
+          ? new URLSearchParams(window.location.search).get("code")
+          : null;
+      if (code) {
+        const { error } = await supabase.auth.exchangeCodeForSession(code);
+        if (error) {
+          if (mounted) {
+            setReady(false);
+            setMessage(
+              "Reset link is invalid or expired. Please request a new password reset email."
+            );
+          }
+          return;
+        }
+        if (mounted) setReady(true);
+        return;
+      }
+
+      // 3) If not, try to read tokens from URL hash and set session
       const tokens = getTokensFromHash();
       if (tokens) {
         const { error } = await supabase.auth.setSession(tokens);
@@ -58,7 +87,7 @@ export default function SetNewPasswordPage() {
         return;
       }
 
-      // 3) No session and no tokens => user opened page directly
+      // 4) No session and no tokens => user opened page directly
       if (mounted) {
         setReady(false);
         setMessage(
@@ -75,6 +104,12 @@ export default function SetNewPasswordPage() {
 
   async function handleUpdatePassword() {
     if (!ready) return;
+
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase) {
+      setMessage("Supabase keys are missing. Please configure your environment variables.");
+      return;
+    }
 
     if (password.length < 6) {
       setMessage("Password must be at least 6 characters.");
@@ -100,16 +135,16 @@ export default function SetNewPasswordPage() {
     setLoading(false);
 
     // Optional: go to login page
-    setTimeout(() => router.push("/Log_in"), 800);
+    setTimeout(() => router.push(AUTH_ROUTES.login), 800);
   }
 
   return (
-    <div className="min-h-screen bg-[#fbfbfb]">
+    <div className="min-h-screen bg-transparent">
       <main className="mx-auto flex min-h-[80vh] max-w-6xl items-center justify-center px-6 py-16 md:px-20">
         <div className="grid w-full grid-cols-1 items-center gap-16 lg:grid-cols-2">
           {/* Left Card */}
           <section className="flex justify-center lg:justify-start">
-            <div className="flex w-full max-w-[520px] min-h-[560px] flex-col rounded-3xl bg-white px-10 py-14 md:px-12 shadow-[0_30px_90px_rgba(0,0,0,0.12)] ring-1 ring-zinc-100">
+            <div className="auth-panel auth-delay-1 surface-card flex w-full max-w-[520px] min-h-[560px] flex-col rounded-3xl px-10 py-14 md:px-12">
               <h1 className="text-center text-4xl font-semibold text-zinc-900">
                 Set new password
               </h1>
@@ -118,7 +153,7 @@ export default function SetNewPasswordPage() {
                 Enter your new password below.
               </div>
 
-              <div className="mt-10 space-y-4">
+              <div className="auth-form-stack mt-10 space-y-4">
                 <div className="space-y-2">
                   <p className="text-xs font-medium text-zinc-600">New password</p>
                   <input
@@ -167,7 +202,7 @@ export default function SetNewPasswordPage() {
                 <div className="mt-8 flex items-center justify-center gap-2 text-xs text-zinc-400">
                   <span>Back to</span>
                   <Link
-                    href="/Log_in"
+                    href={AUTH_ROUTES.login}
                     className="font-semibold underline underline-offset-2 hover:text-zinc-600"
                   >
                     Log in
@@ -178,19 +213,7 @@ export default function SetNewPasswordPage() {
           </section>
 
           {/* Right Illustration */}
-          <section className="relative flex justify-center">
-            <div className="relative hidden min-h-[700px] bottom-20 justify-end items-end lg:flex">
-              <div className="absolute -right-10 bottom-0 h-[600px] w-[380px] rounded-full bg-[#E5E5E5] -translate-y-6" />
-              <Image
-                src="/student.png"
-                alt="Student"
-                width={520}
-                height={760}
-                className="relative z-10 object-contain -translate-y-6 right-6"
-                priority
-              />
-            </div>
-          </section>
+          <AuthStudentIllustration alt="Student finishing a password reset" />
         </div>
       </main>
     </div>

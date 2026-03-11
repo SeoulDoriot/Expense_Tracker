@@ -2,32 +2,24 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@supabase/supabase-js";
 import ShakeWrapper from "@/components/animation/ShakeWrapper";
+import AuthStudentIllustration from "@/components/auth/AuthStudentIllustration";
+import { AUTH_ROUTES } from "@/src/lib/authFlow";
+import { toFriendlyAuthMessage } from "@/src/lib/authMessages";
+import { signInWithSocialProvider, type SocialProvider } from "@/src/lib/socialAuth";
+import { getSupabaseBrowserClient } from "@/src/lib/supabaseBrowser";
 
 export default function LoginPage() {
   const router = useRouter();
-
-  // Supabase client (client-side)
-  const supabase = useMemo(() => {
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-    if (!url || !anonKey) {
-      // We keep it usable, but show a helpful error below on submit.
-      return null;
-    }
-
-    return createClient(url, anonKey);
-  }, []);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [socialLoading, setSocialLoading] = useState<SocialProvider | null>(null);
 
   const [shake, setShake] = useState(false);
 
@@ -49,6 +41,7 @@ export default function LoginPage() {
       return setErrorMsg("Please fill all fields.");
     }
 
+    const supabase = getSupabaseBrowserClient();
     if (!supabase) {
       triggerShake();
       return setErrorMsg(
@@ -67,12 +60,11 @@ export default function LoginPage() {
       if (error) {
         setIsLoading(false);
         triggerShake();
-        return setErrorMsg(error.message || "Login failed.");
+        return setErrorMsg(toFriendlyAuthMessage(error.message || "Login failed."));
       }
 
-      // ✅ New flow: after login go to your app dashboard (change this path if you want)
-      router.push("/dashboard");
-    } catch (err) {
+      router.push(AUTH_ROUTES.dashboard);
+    } catch {
       setIsLoading(false);
       return setErrorMsg("Something went wrong. Please try again.");
     } finally {
@@ -80,17 +72,30 @@ export default function LoginPage() {
     }
   }
 
+  async function handleSocialLogin(provider: SocialProvider) {
+    setErrorMsg(null);
+    setSocialLoading(provider);
+
+    try {
+      await signInWithSocialProvider(provider);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to continue with social sign-in.";
+      setErrorMsg(toFriendlyAuthMessage(message));
+      setSocialLoading(null);
+    }
+  }
+
   return (
-    <div className="min-h-screen bg-[#fbfbfb] flex items-center">
-      <div className="mx-auto grid max-w-6xl grid-cols-1 gap-8 px-6 py-8 lg:grid-cols-2 lg:items-center w-full">
+    <div className="min-h-screen bg-transparent flex items-center">
+      <div className="auth-stage mx-auto grid max-w-6xl grid-cols-1 gap-8 px-6 py-8 lg:grid-cols-2 lg:items-center w-full">
         {/* Title */}
-        <div className="lg:col-span-2 mb-2">
+        <div className="auth-reveal auth-delay-1 lg:col-span-2 mb-2">
           <h1 className="text-4xl font-bold text-zinc-900">Welcome Back !!</h1>
         </div>
 
         {/* Left: Form */}
-        <div className="relative z-20 mt-2 w-full max-w-md">
-          <form onSubmit={handleLogin}>
+        <div className="auth-reveal-left auth-delay-2 relative z-20 mt-2 w-full max-w-md">
+          <form onSubmit={handleLogin} className="auth-form-stack">
             <input
               type="email"
               placeholder="Email"
@@ -110,7 +115,7 @@ export default function LoginPage() {
             </div>
 
             <div className="mt-3 text-right text-xs text-zinc-500">
-              <Link href="/forgot-password">Forgot Password ?</Link>
+              <Link href={AUTH_ROUTES.forgotPassword}>Forgot Password ?</Link>
             </div>
 
             {errorMsg && <p className="mt-4 text-sm text-red-500">{errorMsg}</p>}
@@ -126,56 +131,49 @@ export default function LoginPage() {
             </ShakeWrapper>
           </form>
 
-          <div className="my-8 flex items-center gap-4 text-xs text-zinc-400">
+          <div className="auth-reveal auth-delay-3 my-8 flex items-center gap-4 text-xs text-zinc-400">
             <div className="h-px flex-1 bg-zinc-200" />
             or
             <div className="h-px flex-1 bg-zinc-200" />
           </div>
 
-          <div className="flex items-center justify-center gap-8">
+          <div className="auth-reveal auth-delay-4 flex items-center justify-center gap-8">
             <button
               type="button"
-              className="rounded-full p-2 hover:bg-zinc-100"
+              onClick={() => void handleSocialLogin("google")}
+              disabled={socialLoading !== null}
+              className="rounded-full p-2 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
               aria-label="Continue with Google"
             >
               <Image src="/google.png" alt="Google" width={26} height={26} />
             </button>
             <button
               type="button"
-              className="rounded-full p-2 hover:bg-zinc-100"
+              onClick={() => void handleSocialLogin("apple")}
+              disabled={socialLoading !== null}
+              className="rounded-full p-2 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50"
               aria-label="Continue with Apple"
             >
               <Image src="/apple.png" alt="Apple" width={46} height={46} />
             </button>
           </div>
 
-          <p className="mt-6 text-center text-xs text-zinc-500">
+          {socialLoading ? (
+            <p className="auth-reveal auth-delay-4 mt-3 text-center text-xs text-zinc-500">
+              Redirecting to {socialLoading === "google" ? "Google" : "Apple"}...
+            </p>
+          ) : null}
+
+          <p className="auth-reveal auth-delay-4 mt-6 text-center text-xs text-zinc-500">
             Don’t have an account?{" "}
-            <Link href="/Sign_up" className="font-semibold text-zinc-900 underline">
+            <Link href={AUTH_ROUTES.signup} className="font-semibold text-zinc-900 underline">
               Sign Up
             </Link>
           </p>
         </div>
 
         {/* Right: Image (match Sign_up) */}
-        <div className="relative hidden lg:flex w-full justify-end items-center pointer-events-none">
-          <div className="relative h-[520px] w-[520px]">
-            <div className="absolute -right-10 bottom-[-220] h-[900px] w-[400px] rounded-full bg-[#E5E5E5]" />
-            <div
-              className="absolute right-0 top-0 overflow-hidden rounded-3xl"
-              style={{ transform: "translateY(-40px)" }}
-            >
-              <Image
-                src="/student2.png"
-                alt="student"
-                width={720}
-                height={760}
-                className="object-contain rounded-3xl"
-                priority
-              />
-            </div>
-          </div>
-        </div>
+        <AuthStudentIllustration />
       </div>
     </div>
   );

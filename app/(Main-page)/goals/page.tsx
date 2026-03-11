@@ -4,6 +4,14 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { useRouter } from "next/navigation";
+import {
+  convertCurrencyToUsd,
+  formatAppCurrency,
+  getCurrencyCode,
+  type AppCurrency,
+  type AppLanguage,
+} from "@/src/lib/appPreferences";
+import { useAppPreferences } from "@/src/hooks/useAppPreferences";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -19,22 +27,37 @@ type Goal = {
   target: number;
   saved: number;
   contributingMonthly: number;
-  imageUrl?: string; // local preview url (not persisted)
+  imageUrl?: string;
   image_url?: string | null; // persisted url (optional)
 };
 
-function formatMoney(n: number) {
-  return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+type GoalRow = {
+  id: string;
+  title: string | null;
+  target_amount?: number | null;
+  target?: number | null;
+  saved_amount?: number | null;
+  saved?: number | null;
+  contributing_monthly?: number | null;
+  image_url?: string | null;
+};
+
+function formatMoney(n: number, currency: AppCurrency, language: AppLanguage) {
+  return formatAppCurrency(n, currency, language, {
+    maximumFractionDigits: currency === "KHR" ? 0 : 2,
+  });
 }
 
 export default function GoalsPage() {
   const router = useRouter();
+  const { settings } = useAppPreferences();
 
   const [userId, setUserId] = useState<string>("");
 
   const [goals, setGoals] = useState<Goal[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string>("");
+  const [savingGoal, setSavingGoal] = useState(false);
 
   const [open, setOpen] = useState(false);
 
@@ -50,6 +73,17 @@ export default function GoalsPage() {
     () => goals.reduce((sum, g) => sum + g.saved, 0),
     [goals]
   );
+
+  function mapGoalRow(row: GoalRow): Goal {
+    return {
+      id: String(row.id),
+      title: String(row.title ?? ""),
+      target: Number(row.target_amount ?? row.target ?? 0),
+      saved: Number(row.saved_amount ?? row.saved ?? 0),
+      contributingMonthly: Number(row.contributing_monthly ?? 50),
+      image_url: row.image_url ?? null,
+    };
+  }
 
   // 1) Require Auth: get user on mount
   useEffect(() => {
@@ -81,7 +115,7 @@ export default function GoalsPage() {
       if (!uid) {
         // Not logged in → send to your login page
         // Update this path if your login route is different.
-        router.push("/Auth/login");
+        router.push("/Log_in");
         return;
       }
 
@@ -107,17 +141,17 @@ export default function GoalsPage() {
       setLoadError("");
 
       // Try ordering by created_at first
-      let data: any[] | null = null;
-      let error: any = null;
+      let data: GoalRow[] | null = null;
+      let error: Error | null = null;
 
       {
         const res = await supabase
           .from("goals")
-          .select("id,title,target,saved,contributing_monthly,image_url,created_at,user_id")
+          .select("id,title,target_amount,target,saved_amount,saved,contributing_monthly,image_url,created_at,user_id")
           .eq("user_id", userId)
           .order("created_at", { ascending: false });
 
-        data = res.data as any[] | null;
+        data = res.data as GoalRow[] | null;
         error = res.error;
       }
 
@@ -125,10 +159,10 @@ export default function GoalsPage() {
       if (error && String(error.message || "").toLowerCase().includes("created_at")) {
         const res2 = await supabase
           .from("goals")
-          .select("id,title,target,saved,contributing_monthly,image_url,user_id")
+          .select("id,title,target_amount,target,saved_amount,saved,contributing_monthly,image_url,user_id")
           .eq("user_id", userId);
 
-        data = res2.data as any[] | null;
+        data = res2.data as GoalRow[] | null;
         error = res2.error;
       }
 
@@ -138,14 +172,7 @@ export default function GoalsPage() {
         setLoadError(error.message);
         setGoals([]);
       } else {
-        const mapped: Goal[] = (data ?? []).map((g: any) => ({
-          id: String(g.id),
-          title: String(g.title ?? ""),
-          target: Number(g.target ?? 0),
-          saved: Number(g.saved ?? 0),
-          contributingMonthly: Number(g?.contributing_monthly ?? 50),
-          image_url: g.image_url ?? null,
-        }));
+        const mapped: Goal[] = (data ?? []).map(mapGoalRow);
         setGoals(mapped);
       }
 
@@ -177,36 +204,62 @@ export default function GoalsPage() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const url = URL.createObjectURL(file);
-
-    if (imagePreviewUrl) {
-      try {
-        URL.revokeObjectURL(imagePreviewUrl);
-      } catch {
-        // ignore
-      }
+    if (!file.type.startsWith("image/")) {
+      setLoadError("Please choose a valid image file.");
+      e.target.value = "";
+      return;
     }
 
-    setImagePreviewUrl(url);
-    setImageFileName(file.name);
+    if (file.size > 700 * 1024) {
+      setLoadError("Please use an image smaller than 700 KB.");
+      e.target.value = "";
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      setImagePreviewUrl(result);
+      setImageFileName(file.name);
+      setLoadError("");
+    };
+    reader.onerror = () => {
+      setLoadError("Unable to read that image. Please try another file.");
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
   }
 
   async function addGoal() {
     if (!supabase) return;
     if (!userId) return;
 
-    const t = title.trim();
-    const targetNum = Number(target);
-    const savedNum = Number(saved || "0");
-    const contribNum = Number(contributingMonthly || "0");
+    setLoadError("");
 
-    if (!t) return;
-    if (!Number.isFinite(targetNum) || targetNum <= 0) return;
-    if (!Number.isFinite(savedNum) || savedNum < 0) return;
-    if (!Number.isFinite(contribNum) || contribNum < 0) return;
+    const t = title.trim();
+    const targetNum = convertCurrencyToUsd(Number(target), settings.currency);
+    const savedNum = convertCurrencyToUsd(Number(saved || "0"), settings.currency);
+    const contribNum = convertCurrencyToUsd(Number(contributingMonthly || "0"), settings.currency);
+
+    if (!t) {
+      setLoadError("Goal title is required.");
+      return;
+    }
+    if (!Number.isFinite(targetNum) || targetNum <= 0) {
+      setLoadError("Target amount must be greater than 0.");
+      return;
+    }
+    if (!Number.isFinite(savedNum) || savedNum < 0) {
+      setLoadError("Saved amount must be 0 or greater.");
+      return;
+    }
+    if (!Number.isFinite(contribNum) || contribNum < 0) {
+      setLoadError("Monthly contribution must be 0 or greater.");
+      return;
+    }
 
     const safeSaved = Math.min(savedNum, targetNum);
-    const localPreview = imagePreviewUrl || undefined;
+    const persistedImageUrl = imagePreviewUrl || null;
 
     const optimistic: Goal = {
       id: `tmp_${Date.now()}`,
@@ -214,44 +267,43 @@ export default function GoalsPage() {
       target: targetNum,
       saved: safeSaved,
       contributingMonthly: contribNum || 0,
-      imageUrl: localPreview,
-      image_url: null,
+      imageUrl: persistedImageUrl ?? undefined,
+      image_url: persistedImageUrl,
     };
 
     setGoals((prev) => [optimistic, ...prev]);
+    setSavingGoal(true);
 
     const { data, error } = await supabase
       .from("goals")
       .insert({
         user_id: userId,
         title: t,
+        target_amount: targetNum,
         target: targetNum,
+        saved_amount: safeSaved,
         saved: safeSaved,
         contributing_monthly: contribNum || 0,
-        image_url: null,
+        image_url: persistedImageUrl,
       })
-      .select("id,title,target,saved,contributing_monthly,image_url,created_at,user_id")
+      .select("id,title,target_amount,target,saved_amount,saved,contributing_monthly,image_url,created_at,user_id")
       .single();
 
     if (error) {
       setGoals((prev) => prev.filter((g) => g.id !== optimistic.id));
       setLoadError(error.message);
-      closeModal();
+      setSavingGoal(false);
       return;
     }
 
     const real: Goal = {
-      id: String(data.id),
-      title: String(data.title ?? t),
-      target: Number(data.target ?? targetNum),
-      saved: Number(data.saved ?? safeSaved),
-      contributingMonthly: Number(data?.contributing_monthly ?? contribNum ?? 0),
-      imageUrl: localPreview,
-      image_url: data.image_url ?? null,
+      ...mapGoalRow(data as GoalRow),
+      imageUrl: persistedImageUrl ?? undefined,
     };
 
     setGoals((prev) => [real, ...prev.filter((g) => g.id !== optimistic.id)]);
     closeModal();
+    setSavingGoal(false);
   }
 
   async function addContribution(goalId: string, amount: number) {
@@ -272,7 +324,10 @@ export default function GoalsPage() {
 
     const { error } = await supabase
       .from("goals")
-      .update({ saved: newSaved })
+      .update({
+        saved_amount: newSaved,
+        saved: newSaved,
+      })
       .eq("id", goalId)
       .eq("user_id", userId);
 
@@ -282,7 +337,7 @@ export default function GoalsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-[#F3F4F6]">
+    <div className="min-h-screen bg-transparent">
       <style jsx global>{`
         @media (prefers-reduced-motion: reduce) {
           .se-motion { animation: none !important; transition: none !important; }
@@ -343,7 +398,9 @@ export default function GoalsPage() {
         <div className="mb-8">
           <div className="rounded-2xl border border-zinc-100 bg-white p-6 shadow-sm se-hover-lift">
             <p className="text-sm text-zinc-500">Total Saved</p>
-            <h2 className="mt-1 text-2xl font-semibold text-zinc-900">${formatMoney(totalSaved)}</h2>
+            <h2 className="mt-1 text-2xl font-semibold text-zinc-900">
+              {formatMoney(totalSaved, settings.currency, settings.language)}
+            </h2>
           </div>
         </div>
 
@@ -376,7 +433,9 @@ export default function GoalsPage() {
 
                     <div>
                       <h3 className="text-lg font-medium text-zinc-900">{g.title}</h3>
-                      <p className="text-xs text-zinc-400">Target: ${formatMoney(g.target)}</p>
+                      <p className="text-xs text-zinc-400">
+                        Target: {formatMoney(g.target, settings.currency, settings.language)}
+                      </p>
                     </div>
                   </div>
 
@@ -388,13 +447,17 @@ export default function GoalsPage() {
                 </div>
 
                 <div className="flex items-center justify-between text-sm">
-                  <span className="text-zinc-500">Saved: ${formatMoney(g.saved)}</span>
-                  <span className="text-zinc-400">Remaining: ${formatMoney(Math.max(0, g.target - g.saved))}</span>
+                  <span className="text-zinc-500">
+                    Saved: {formatMoney(g.saved, settings.currency, settings.language)}
+                  </span>
+                  <span className="text-zinc-400">
+                    Remaining: {formatMoney(Math.max(0, g.target - g.saved), settings.currency, settings.language)}
+                  </span>
                 </div>
 
                 <div className="mt-4 flex items-center justify-between gap-3">
                   <span className="text-xs font-medium text-zinc-500">
-                    Contributing ${formatMoney(g.contributingMonthly)} / month
+                    Contributing {formatMoney(g.contributingMonthly, settings.currency, settings.language)} / month
                   </span>
 
                   <button
@@ -402,7 +465,7 @@ export default function GoalsPage() {
                     onClick={() => addContribution(g.id, g.contributingMonthly || 50)}
                     className="inline-flex items-center justify-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm se-btn hover:bg-blue-700"
                   >
-                    + Add ${formatMoney(g.contributingMonthly || 50)}
+                    + Add {formatMoney(g.contributingMonthly || 50, settings.currency, settings.language)}
                   </button>
                 </div>
               </div>
@@ -481,7 +544,9 @@ export default function GoalsPage() {
 
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                 <div>
-                  <label className="text-xs font-semibold text-zinc-600">Target ($)</label>
+                  <label className="text-xs font-semibold text-zinc-600">
+                    Target ({getCurrencyCode(settings.currency)})
+                  </label>
                   <input
                     value={target}
                     onChange={(e) => setTarget(e.target.value)}
@@ -492,7 +557,9 @@ export default function GoalsPage() {
                 </div>
 
                 <div>
-                  <label className="text-xs font-semibold text-zinc-600">Saved so far ($)</label>
+                  <label className="text-xs font-semibold text-zinc-600">
+                    Saved so far ({getCurrencyCode(settings.currency)})
+                  </label>
                   <input
                     value={saved}
                     onChange={(e) => setSaved(e.target.value)}
@@ -503,7 +570,9 @@ export default function GoalsPage() {
                 </div>
 
                 <div>
-                  <label className="text-xs font-semibold text-zinc-600">Contributing / month ($)</label>
+                  <label className="text-xs font-semibold text-zinc-600">
+                    Contributing / month ({getCurrencyCode(settings.currency)})
+                  </label>
                   <input
                     value={contributingMonthly}
                     onChange={(e) => setContributingMonthly(e.target.value)}
@@ -525,14 +594,15 @@ export default function GoalsPage() {
                 <button
                   type="button"
                   onClick={addGoal}
+                  disabled={savingGoal}
                   className="h-11 rounded-xl bg-blue-600 px-5 text-sm font-semibold text-white shadow-sm se-btn hover:bg-blue-700"
                 >
-                  Create
+                  {savingGoal ? "Creating..." : "Create"}
                 </button>
               </div>
 
               <p className="text-[11px] text-zinc-400">
-                Note: the selected image is a local preview. To keep it after refresh, upload it to Supabase Storage and save the public URL in `image_url`.
+                The selected image will be saved with this goal and stay visible after refresh.
               </p>
               
             </div>

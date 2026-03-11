@@ -15,12 +15,12 @@ export default function Button({
   ...props
 }: ButtonProps) {
   const base =
-    "h-12 px-10 rounded-full text-sm font-semibold transition inline-flex items-center justify-center select-none";
+    "h-14 w-full rounded-full px-10 text-sm font-semibold transition inline-flex items-center justify-center select-none";
 
   const styles =
     variant === "primary"
-      ? "bg-[#1F2937] text-white hover:opacity-90"
-      : "bg-white border border-zinc-900 text-zinc-900 hover:bg-zinc-900 hover:text-[#1F2937]";
+      ? "bg-[#111827] text-white hover:bg-[#1F2937] disabled:opacity-60"
+      : "bg-white border border-zinc-900 text-zinc-900 hover:bg-zinc-900 hover:text-white";
 
   return (
     <button className={`${base} ${styles} ${className}`} {...props}>

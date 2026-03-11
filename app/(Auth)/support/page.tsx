@@ -41,7 +41,7 @@ export default function SupportPage() {
 
 
   return (
-    <main className="min-h-screen bg-[#fbfbfb] text-slate-900">
+    <main className="min-h-screen bg-transparent text-slate-900">
       <div className="mx-auto w-full max-w-6xl px-6 py-12">
         {/* Header */}
         <div className="rounded-3xl border border-slate-200 bg-white px-8 py-10 shadow-[0_18px_50px_rgba(15,23,42,0.06)]">

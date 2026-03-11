@@ -2,6 +2,19 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/src/lib/supabaseClient";
+import { readStoredJson, removeStoredValue, writeStoredJson } from "@/src/lib/browserStorage";
+import {
+  convertCurrencyToUsd,
+  formatAppCurrency,
+  getCurrencyCode,
+  type AppCurrency,
+  type AppLanguage,
+} from "@/src/lib/appPreferences";
+import { useAppPreferences } from "@/src/hooks/useAppPreferences";
+import {
+  getTransactionCategories,
+  isValidTransactionCategory,
+} from "@/src/lib/transactionCategories";
 
 type TxType = "Income" | "Expense";
 
@@ -24,15 +37,27 @@ type StatMeta = {
   description: string;
 };
 
-function formatMoney(amount: number) {
-  const abs = Math.abs(amount);
-  const formatted = abs.toLocaleString(undefined, { maximumFractionDigits: 0 });
-  const sign = amount >= 0 ? "+" : "-";
-  return `${sign}$${formatted}`;
+type DashboardDraft = {
+  txType: TxType;
+  amount: string;
+  description: string;
+  category: string;
+  date: string;
+};
+
+const DASHBOARD_DRAFT_KEY = "dashboard-transaction-draft";
+
+function formatMoney(amount: number, currency: AppCurrency, language: AppLanguage) {
+  return formatAppCurrency(amount, currency, language, {
+    signed: true,
+    maximumFractionDigits: currency === "KHR" ? 0 : 2,
+  });
 }
 
-function formatCurrency(amount: number) {
-  return `$${amount.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+function formatCurrency(amount: number, currency: AppCurrency, language: AppLanguage) {
+  return formatAppCurrency(amount, currency, language, {
+    maximumFractionDigits: currency === "KHR" ? 0 : 2,
+  });
 }
 
 function Pill({ children, tone }: { children: React.ReactNode; tone: "neutral" | "income" | "expense" }) {
@@ -152,6 +177,7 @@ function Modal({ open, title, children, onClose }: { open: boolean; title: strin
 }
 
 export default function DashboardPage() {
+  const { settings } = useAppPreferences();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loadingTx, setLoadingTx] = useState(false);
   const [txError, setTxError] = useState<string | null>(null);
@@ -165,6 +191,8 @@ export default function DashboardPage() {
   const [description, setDescription] = useState<string>("");
   const [category, setCategory] = useState<string>("");
   const [date, setDate] = useState<string>("");
+  const [draftReady, setDraftReady] = useState(false);
+  const categoryOptions = useMemo(() => getTransactionCategories(txType), [txType]);
 
   const stats = useMemo(() => {
     const income = transactions.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0);
@@ -234,11 +262,10 @@ export default function DashboardPage() {
       // IMPORTANT: your DB columns are: title, type, category, occurred_on, amount
       const { data, error } = await supabase
         .from("transactions")
-        .select("id,title,type,category,occurred_on,amount")
+        .select("id,title,type,category,occurred_on,amount,created_at")
         .eq("user_id", user.id)
         .order("occurred_on", { ascending: false })
-        .order("created_at", { ascending: false })
-        .limit(6);
+        .order("created_at", { ascending: false });
 
       if (error) throw error;
 
@@ -268,9 +295,100 @@ export default function DashboardPage() {
     loadTransactions();
   }, []);
 
+  useEffect(() => {
+    const draft = readStoredJson<DashboardDraft>(DASHBOARD_DRAFT_KEY);
+
+    if (draft) {
+      setTxType(draft.txType ?? "Expense");
+      setAmount(draft.amount ?? "");
+      setDescription(draft.description ?? "");
+      setCategory(draft.category ?? "");
+      setDate(draft.date ?? "");
+    }
+
+    setDraftReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!draftReady) {
+      return;
+    }
+
+    writeStoredJson<DashboardDraft>(DASHBOARD_DRAFT_KEY, {
+      txType,
+      amount,
+      description,
+      category,
+      date,
+    });
+  }, [amount, category, date, description, draftReady, txType]);
+
+  useEffect(() => {
+    if (!category) {
+      return;
+    }
+
+    if (!isValidTransactionCategory(txType, category)) {
+      setCategory("");
+    }
+  }, [category, txType]);
+
+  useEffect(() => {
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+
+    async function setupRealtime() {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const user = sessionData.session?.user;
+      if (!user) return;
+
+      channel = supabase
+        .channel(`dashboard-transactions-${user.id}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "transactions",
+            filter: `user_id=eq.${user.id}`,
+          },
+          () => {
+            void loadTransactions();
+          }
+        )
+        .subscribe();
+    }
+
+    function handleFocusRefresh() {
+      void loadTransactions();
+    }
+
+    function handleVisibilityRefresh() {
+      if (document.visibilityState === "visible") {
+        void loadTransactions();
+      }
+    }
+
+    void setupRealtime();
+    window.addEventListener("focus", handleFocusRefresh);
+    document.addEventListener("visibilitychange", handleVisibilityRefresh);
+
+    return () => {
+      window.removeEventListener("focus", handleFocusRefresh);
+      document.removeEventListener("visibilitychange", handleVisibilityRefresh);
+      if (channel) {
+        void supabase.removeChannel(channel);
+      }
+    };
+  }, []);
+
   async function addTransaction() {
     const n = Number(amount);
     if (!n || n <= 0) return;
+
+    if (!category) {
+      setTxError("Please choose a category.");
+      return;
+    }
 
     setTxError(null);
 
@@ -282,7 +400,7 @@ export default function DashboardPage() {
       if (!user) throw new Error("Not logged in.");
 
       const title = description.trim() ? description.trim() : txType === "Income" ? "Income" : "Expense";
-      const categoryValue = category.trim() ? category.trim() : "General";
+      const categoryValue = category.trim();
       const occurredOn = date ? date : new Date().toISOString().slice(0, 10);
 
       // DB expects type text; we store lower-case to keep consistent with policies
@@ -293,7 +411,7 @@ export default function DashboardPage() {
         title,
         type: dbType,
         category: categoryValue,
-        amount: n,
+        amount: Math.round(convertCurrencyToUsd(n, settings.currency) * 100) / 100,
         occurred_on: occurredOn,
       });
 
@@ -303,6 +421,7 @@ export default function DashboardPage() {
       setDescription("");
       setCategory("");
       setDate("");
+      removeStoredValue(DASHBOARD_DRAFT_KEY);
 
       await loadTransactions();
     } catch (e: any) {
@@ -311,7 +430,7 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="min-h-screen bg-[#F3F4F6]">
+    <div className="min-h-screen bg-transparent">
       {/* subtle page bg like Figma */}
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
         <div className="absolute -right-72 -top-52 h-[620px] w-[620px] rounded-full bg-slate-900/5" />
@@ -330,11 +449,11 @@ export default function DashboardPage() {
           {statMeta.map((m) => {
             const value =
               m.key === "balance"
-                ? formatCurrency(stats.totalBalance)
+                ? formatCurrency(stats.totalBalance, settings.currency, settings.language)
                 : m.key === "income"
-                ? formatCurrency(stats.totalIncome)
+                ? formatCurrency(stats.totalIncome, settings.currency, settings.language)
                 : m.key === "expense"
-                ? formatCurrency(stats.totalExpense)
+                ? formatCurrency(stats.totalExpense, settings.currency, settings.language)
                 : `${stats.savingRate}%`;
 
             const chip =
@@ -386,7 +505,7 @@ export default function DashboardPage() {
                   </select>
                 </Field>
 
-                <Field label="Amount ($)">
+                <Field label={`Amount (${getCurrencyCode(settings.currency)})`}>
                   <input
                     value={amount}
                     onChange={(e) => setAmount(e.target.value.replace(/[^\d.]/g, ""))}
@@ -406,12 +525,20 @@ export default function DashboardPage() {
                 </Field>
 
                 <Field label="Category">
-                  <input
+                  <select
                     value={category}
                     onChange={(e) => setCategory(e.target.value)}
-                    placeholder="Select category"
                     className="h-10 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 text-sm text-zinc-800 outline-none focus:border-zinc-300"
-                  />
+                  >
+                    <option value="" disabled>
+                      Select category
+                    </option>
+                    {categoryOptions.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
                 </Field>
 
                 <Field label="Date">
@@ -475,7 +602,7 @@ export default function DashboardPage() {
 
                           <div className="text-right">
                             <p className={`text-sm font-semibold ${isIncome ? "text-emerald-600" : "text-rose-600"}`}>
-                              {formatMoney(t.amount)}
+                              {formatMoney(t.amount, settings.currency, settings.language)}
                             </p>
                           </div>
                         </div>
@@ -485,7 +612,7 @@ export default function DashboardPage() {
                 </div>
 
                 <p className="mt-3 text-[11px] text-zinc-400">
-                  Tip: Your dashboard list and Transactions page can read the same Supabase table (transactions).
+                  Dashboard totals now use all saved transactions, while this list shows only your latest 6 records from the same Supabase table.
                 </p>
               </div>
             </div>
@@ -504,12 +631,12 @@ export default function DashboardPage() {
             <p className="text-sm text-zinc-700">
               Your <span className="font-semibold">current balance</span> is:
             </p>
-            <p className="mt-2 text-3xl font-semibold text-zinc-900">{formatCurrency(stats.totalBalance)}</p>
+            <p className="mt-2 text-3xl font-semibold text-zinc-900">{formatCurrency(stats.totalBalance, settings.currency, settings.language)}</p>
             <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
               <p className="text-xs font-semibold text-zinc-700">How it’s calculated</p>
               <p className="mt-2 text-xs text-zinc-600">Balance = Income − Expense</p>
               <p className="mt-1 text-xs text-zinc-600">
-                {formatCurrency(stats.totalIncome)} − {formatCurrency(stats.totalExpense)} = {formatCurrency(stats.totalBalance)}
+                {formatCurrency(stats.totalIncome, settings.currency, settings.language)} − {formatCurrency(stats.totalExpense, settings.currency, settings.language)} = {formatCurrency(stats.totalBalance, settings.currency, settings.language)}
               </p>
             </div>
             <div className="mt-4 rounded-xl border border-zinc-200 bg-white p-4">
@@ -522,7 +649,7 @@ export default function DashboardPage() {
         ) : openInfo === "income" ? (
           <>
             <p className="text-sm text-zinc-700">Your <span className="font-semibold">total income</span> so far is:</p>
-            <p className="mt-2 text-3xl font-semibold text-zinc-900">{formatCurrency(stats.totalIncome)}</p>
+            <p className="mt-2 text-3xl font-semibold text-zinc-900">{formatCurrency(stats.totalIncome, settings.currency, settings.language)}</p>
             <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
               <p className="text-xs font-semibold text-zinc-700">What counts as income</p>
               <ul className="mt-2 list-disc pl-5 text-xs text-zinc-600 space-y-1">
@@ -541,7 +668,7 @@ export default function DashboardPage() {
         ) : openInfo === "expense" ? (
           <>
             <p className="text-sm text-zinc-700">Your <span className="font-semibold">total expense</span> so far is:</p>
-            <p className="mt-2 text-3xl font-semibold text-zinc-900">{formatCurrency(stats.totalExpense)}</p>
+            <p className="mt-2 text-3xl font-semibold text-zinc-900">{formatCurrency(stats.totalExpense, settings.currency, settings.language)}</p>
             <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
               <p className="text-xs font-semibold text-zinc-700">What counts as expense</p>
               <ul className="mt-2 list-disc pl-5 text-xs text-zinc-600 space-y-1">
@@ -565,7 +692,7 @@ export default function DashboardPage() {
               <p className="text-xs font-semibold text-zinc-700">How it’s calculated</p>
               <p className="mt-2 text-xs text-zinc-600">Saving Rate = (Income − Expense) / Income</p>
               <p className="mt-1 text-xs text-zinc-600">
-                ({formatCurrency(stats.totalIncome)} − {formatCurrency(stats.totalExpense)}) / {formatCurrency(stats.totalIncome)}
+                ({formatCurrency(stats.totalIncome, settings.currency, settings.language)} − {formatCurrency(stats.totalExpense, settings.currency, settings.language)}) / {formatCurrency(stats.totalIncome, settings.currency, settings.language)}
               </p>
             </div>
             <div className="mt-4 rounded-xl border border-zinc-200 bg-white p-4">

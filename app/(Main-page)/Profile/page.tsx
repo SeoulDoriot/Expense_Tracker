@@ -1,7 +1,16 @@
 "use client";
 
+import {
+  applyAppSettings,
+  DEFAULT_APP_SETTINGS,
+  readAppPreferences,
+  translateAppLabel,
+  type AppSettings,
+  writeAppPreferences,
+} from "@/src/lib/appPreferences";
+import { writeProfileDisplay } from "@/src/lib/profileDisplay";
 import { supabase } from "@/src/lib/supabaseClient";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 function cn(...classes: Array<string | false | null | undefined>) {
@@ -15,28 +24,12 @@ type ProfileRow = {
   full_name: string | null;
   avatar_url: string | null;
   email: string | null; // optional (can store for convenience)
-  plan: "Free" | "Pro" | null;
   created_at?: string | null;
+  updated_at?: string | null;
 };
 
-type SettingsRow = {
-  user_id: string; // same as auth.user.id
-  currency: string | null; // "USD", "KHR", ...
-  language: string | null; // "en", "km", ...
-  theme: "light" | "dark" | null;
-  budget_alert: boolean | null;
-  weekly_summary: boolean | null;
-  daily_reminder: boolean | null;
-};
-
-const DEFAULT_SETTINGS: SettingsRow = {
-  user_id: "",
-  currency: "USD",
-  language: "en",
-  theme: "light",
-  budget_alert: true,
-  weekly_summary: true,
-  daily_reminder: false,
+type SettingsRow = AppSettings & {
+  user_id: string;
 };
 
 function initials(name: string) {
@@ -151,6 +144,7 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
 
 export default function ProfilePage() {
   const router = useRouter();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [tab, setTab] = useState<TabKey>("general");
 
@@ -161,39 +155,33 @@ export default function ProfilePage() {
   const [email, setEmail] = useState<string>("");
 
   const [profile, setProfile] = useState<ProfileRow | null>(null);
-  const [settings, setSettings] = useState<SettingsRow>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<SettingsRow>({
+    ...DEFAULT_APP_SETTINGS,
+    user_id: "",
+  });
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [statusTone, setStatusTone] = useState<"success" | "error" | null>(null);
 
   // form fields (editable)
   const [fullName, setFullName] = useState<string>("");
   const [plan, setPlan] = useState<"Free" | "Pro">("Free");
+  const [avatarUrl, setAvatarUrl] = useState<string>("");
 
   const avatarFallback = useMemo(() => initials(fullName || "User"), [fullName]);
+  const currentLanguage = settings.language;
 
   useEffect(() => {
     let alive = true;
 
-    async function load() {
-      setLoading(true);
-
-      const userRes = await supabase.auth.getUser();
-      const u = userRes.data.user;
-
-      if (!alive) return;
-
-      if (!u) {
-        // not logged in — go to login page if you have one
-        setLoading(false);
-        return;
-      }
-
-      setUserId(u.id);
-      setEmail(u.email ?? "");
+    async function hydrateProfile(user: { id: string; email?: string | null; user_metadata?: { full_name?: string; avatar_url?: string } }) {
+      setUserId(user.id);
+      setEmail(user.email ?? "");
 
       // ---- load profile row (optional but recommended)
       const profRes = await supabase
         .from("profiles")
-        .select("id,full_name,avatar_url,email,plan,created_at")
-        .eq("id", u.id)
+        .select("id,full_name,avatar_url,email,created_at,updated_at")
+        .eq("id", user.id)
         .maybeSingle();
 
       if (!alive) return;
@@ -204,76 +192,214 @@ export default function ProfilePage() {
             full_name: profRes.data.full_name ?? null,
             avatar_url: profRes.data.avatar_url ?? null,
             email: profRes.data.email ?? null,
-            plan: (profRes.data.plan as any) ?? "Free",
             created_at: profRes.data.created_at ?? null,
+            updated_at: profRes.data.updated_at ?? null,
           }
         : null;
 
       // prefill
-      const namePrefill = profRow?.full_name || (u.user_metadata?.full_name as string) || "";
+      const namePrefill = profRow?.full_name || user.user_metadata?.full_name || "";
+      const avatarPrefill = profRow?.avatar_url || user.user_metadata?.avatar_url || "";
+      const storedPrefs = readAppPreferences(user.id);
       setProfile(profRow);
       setFullName(namePrefill);
-      setPlan((profRow?.plan as any) || "Free");
-
-      // ---- load settings row (optional but recommended)
-      const setRes = await supabase
-        .from("user_settings")
-        .select("user_id,currency,language,theme,budget_alert,weekly_summary,daily_reminder")
-        .eq("user_id", u.id)
-        .maybeSingle();
-
-      if (!alive) return;
-
+      setPlan(storedPrefs?.plan ?? "Free");
+      setAvatarUrl(avatarPrefill);
+      writeProfileDisplay(user.id, {
+        fullName: namePrefill || "Smart User",
+        email: profRow?.email || user.email || "No email",
+        avatarUrl: avatarPrefill || null,
+      });
       const merged: SettingsRow = {
-        ...DEFAULT_SETTINGS,
-        user_id: u.id,
-        ...(setRes.data ?? {}),
+        ...DEFAULT_APP_SETTINGS,
+        user_id: user.id,
+        ...(storedPrefs?.settings ?? {}),
       };
 
       setSettings(merged);
       setLoading(false);
     }
 
-    load();
+    async function load() {
+      setLoading(true);
+
+      const { data: sessionData } = await supabase.auth.getSession();
+      const sessionUser = sessionData.session?.user;
+
+      if (!alive) return;
+
+      if (sessionUser) {
+        await hydrateProfile(sessionUser);
+        return;
+      }
+
+      const userRes = await supabase.auth.getUser();
+      const directUser = userRes.data.user;
+
+      if (!alive) return;
+
+      if (!directUser) {
+        setUserId(null);
+        setProfile(null);
+        setLoading(false);
+        return;
+      }
+
+      await hydrateProfile(directUser);
+    }
+
+    void load();
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!alive) return;
+
+      if (session?.user) {
+        void hydrateProfile(session.user);
+        return;
+      }
+
+      if (event === "SIGNED_OUT") {
+        setUserId(null);
+        setProfile(null);
+        setLoading(false);
+        router.push("/Log_in");
+      }
+    });
 
     return () => {
       alive = false;
+      authListener.subscription.unsubscribe();
     };
-  }, []);
+  }, [router]);
 
   async function saveAll() {
     if (!userId) return;
     setSaving(true);
+    setStatusMsg(null);
+    setStatusTone(null);
 
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
+    if (!session?.access_token) {
+      setSaving(false);
+      setStatusTone("error");
+      setStatusMsg("Your session expired. Please log in again and retry.");
+      router.push("/Log_in");
+      return;
+    }
+
+    const authUpdate = await supabase.auth.updateUser({
+      data: {
+        full_name: fullName.trim() ? fullName.trim() : "",
+      },
+    });
     // 1) upsert profile
     const profilePayload: ProfileRow = {
       id: userId,
       full_name: fullName.trim() ? fullName.trim() : null,
-      avatar_url: profile?.avatar_url ?? null,
+      avatar_url: avatarUrl.trim() ? avatarUrl.trim() : null,
       email: email || null,
-      plan: plan ?? "Free",
     };
 
-    const profUpsert = await supabase.from("profiles").upsert(profilePayload, { onConflict: "id" });
-
-    // 2) upsert settings
-    const settingsPayload: SettingsRow = {
-      ...settings,
-      user_id: userId,
+    const profileResponse = await fetch("/api/profile/save", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        fullName: profilePayload.full_name,
+        avatarUrl: profilePayload.avatar_url,
+      }),
+    });
+    const profileResult = (await profileResponse.json()) as {
+      success: boolean;
+      message?: string;
+      profile?: ProfileRow;
     };
-
-    const setUpsert = await supabase.from("user_settings").upsert(settingsPayload, { onConflict: "user_id" });
+    writeAppPreferences(userId, {
+      plan,
+      settings: {
+        currency: settings.currency,
+        language: settings.language,
+        theme: settings.theme,
+        budget_alert: settings.budget_alert,
+        weekly_summary: settings.weekly_summary,
+        daily_reminder: settings.daily_reminder,
+      },
+    });
+    applyAppSettings(settings);
 
     setSaving(false);
 
-    if (profUpsert.error || setUpsert.error) {
-      alert(
-        `Save failed:\n${profUpsert.error?.message ?? ""}\n${setUpsert.error?.message ?? ""}`.trim()
+    if (authUpdate.error || !profileResponse.ok || !profileResult.success) {
+      setStatusTone("error");
+      setStatusMsg(
+        `Save failed. ${authUpdate.error?.message ?? ""} ${profileResult.message ?? ""}`.trim()
       );
       return;
     }
 
-    alert("Saved ✅");
+    setProfile(profileResult.profile ?? {
+      id: userId,
+      full_name: profilePayload.full_name,
+      avatar_url: profilePayload.avatar_url,
+      email: profilePayload.email,
+      created_at: profile?.created_at ?? null,
+      updated_at: profile?.updated_at ?? null,
+    });
+    writeProfileDisplay(userId, {
+      fullName: profilePayload.full_name || "Smart User",
+      email: profilePayload.email || "No email",
+      avatarUrl: profilePayload.avatar_url,
+    });
+    setStatusTone("success");
+    setStatusMsg("Profile updated successfully.");
+  }
+
+  function handleChoosePhoto() {
+    fileInputRef.current?.click();
+  }
+
+  function handleRemovePhoto() {
+    setAvatarUrl("");
+  }
+
+  function handleAvatarFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    if (!file.type.startsWith("image/")) {
+      setStatusTone("error");
+      setStatusMsg("Please choose a valid image file.");
+      e.target.value = "";
+      return;
+    }
+
+    if (file.size > 1024 * 1024) {
+      setStatusTone("error");
+      setStatusMsg("Please use an image smaller than 1 MB.");
+      e.target.value = "";
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      setAvatarUrl(result);
+      setStatusTone(null);
+      setStatusMsg(null);
+    };
+    reader.onerror = () => {
+      setStatusTone("error");
+      setStatusMsg("Unable to read that image. Please try another file.");
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
   }
 
   async function connect(provider: "google" | "apple") {
@@ -283,7 +409,7 @@ export default function ProfilePage() {
       options: {
         redirectTo:
           typeof window !== "undefined"
-            ? `${window.location.origin}/profile`
+            ? `${window.location.origin}/Profile`
             : undefined,
       },
     });
@@ -316,7 +442,7 @@ export default function ProfilePage() {
   };
 
   return (
-    <div className="min-h-screen bg-[#F3F4F6]">
+    <div className="min-h-screen bg-transparent">
       {/* Your layout already has navbar — so this page is only content */}
 
       <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
@@ -335,7 +461,7 @@ export default function ProfilePage() {
         <div className="rounded-[28px] bg-white shadow-[0_18px_60px_rgba(0,0,0,0.12)] ring-1 ring-black/5">
           <div className="px-6 pt-7 sm:px-8">
             <h1 className="text-2xl font-semibold text-zinc-900">Profile</h1>
-            <p className="mt-1 text-sm text-zinc-500">Manage your account and app settings.</p>
+            <p className="mt-1 text-sm text-zinc-500">Manage the profile and settings for the currently logged-in user.</p>
           </div>
 
           <div className="px-6 pb-8 pt-6 sm:px-8">
@@ -354,10 +480,10 @@ export default function ProfilePage() {
                   <div className="rounded-2xl bg-white ring-1 ring-black/5 p-5 shadow-[0_12px_30px_rgba(0,0,0,0.06)]">
                     <div className="flex flex-col items-center text-center">
                       {/* Avatar */}
-                      {profile?.avatar_url ? (
+                      {avatarUrl ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img
-                          src={profile.avatar_url}
+                          src={avatarUrl}
                           alt="avatar"
                           className="h-24 w-24 rounded-full object-cover ring-1 ring-black/10"
                         />
@@ -431,6 +557,39 @@ export default function ProfilePage() {
                     })}
                   </div>
 
+                  <div className="mt-5 flex flex-col gap-3 rounded-2xl border border-zinc-200 bg-zinc-50 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-sm font-semibold text-zinc-900">Save your profile changes</p>
+                      <p className="mt-1 text-xs text-zinc-500">
+                        Your updated name and photo will also appear in the top navigation.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={saveAll}
+                      disabled={saving}
+                      className={cn(
+                        "h-11 rounded-xl px-5 text-sm font-semibold text-white transition",
+                        saving ? "bg-zinc-400" : "bg-[#111827] hover:bg-[#1F2937]"
+                      )}
+                    >
+                      {saving ? "Saving..." : "Save Changes"}
+                    </button>
+                  </div>
+
+                  {statusMsg ? (
+                    <div
+                      className={cn(
+                        "mt-4 rounded-2xl border px-4 py-3 text-sm",
+                        statusTone === "success"
+                          ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                          : "border-rose-200 bg-rose-50 text-rose-700"
+                      )}
+                    >
+                      {statusMsg}
+                    </div>
+                  ) : null}
+
                   {/* TAB PANELS */}
                   {tab === "general" ? (
                     <div className="pt-5">
@@ -439,6 +598,58 @@ export default function ProfilePage() {
 
                       <div className="mt-5 grid grid-cols-1 gap-4">
                         <div>
+                          <label className="text-sm font-semibold text-zinc-800">Profile Photo</label>
+                          <div className="mt-2 rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                            <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
+                              {avatarUrl ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img
+                                  src={avatarUrl}
+                                  alt="Profile preview"
+                                  className="h-20 w-20 rounded-full object-cover ring-1 ring-black/10"
+                                />
+                              ) : (
+                                <div className="flex h-20 w-20 items-center justify-center rounded-full bg-zinc-200 text-xl font-semibold text-zinc-700 ring-1 ring-black/10">
+                                  {avatarFallback}
+                                </div>
+                              )}
+
+                              <div className="flex-1">
+                                <p className="text-sm font-medium text-zinc-900">
+                                  Upload a square photo for the best result.
+                                </p>
+                                <p className="mt-1 text-xs text-zinc-500">
+                                  PNG, JPG, or WEBP up to 1 MB.
+                                </p>
+                                <div className="mt-3 flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={handleChoosePhoto}
+                                    className="h-10 rounded-xl bg-zinc-900 px-4 text-sm font-semibold text-white transition hover:bg-zinc-800"
+                                  >
+                                    Change photo
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={handleRemovePhoto}
+                                    className="h-10 rounded-xl border border-zinc-200 bg-white px-4 text-sm font-semibold text-zinc-700 transition hover:bg-zinc-50"
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
+                                <input
+                                  ref={fileInputRef}
+                                  type="file"
+                                  accept="image/png,image/jpeg,image/webp"
+                                  className="hidden"
+                                  onChange={handleAvatarFileChange}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div>
                           <label className="text-sm font-semibold text-zinc-800">Full Name</label>
                           <input
                             value={fullName}
@@ -446,6 +657,15 @@ export default function ProfilePage() {
                             placeholder="Your full name"
                             className="mt-2 h-11 w-full rounded-xl border border-zinc-200 bg-white px-4 text-sm outline-none focus:ring-2 focus:ring-zinc-900/15"
                           />
+                        </div>
+                        <div>
+                          <label className="text-sm font-semibold text-zinc-800">Email</label>
+                          <input
+                            value={email}
+                            readOnly
+                            className="mt-2 h-11 w-full rounded-xl border border-zinc-200 bg-zinc-100 px-4 text-sm text-zinc-600 outline-none"
+                          />
+                          
                         </div>
 
                         <div>
@@ -477,15 +697,12 @@ export default function ProfilePage() {
                             </button>
                           </div>
                           <p className="mt-2 text-xs text-zinc-500">
-                            (You can keep “Free” for demo. Later you can connect real subscription.)
                           </p>
                         </div>
 
                         <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
                           <p className="text-sm font-semibold text-zinc-900">Connect Accounts</p>
-                          <p className="mt-1 text-xs text-zinc-500">
-                            Your plan: only Google + Apple (perfect ✅)
-                          </p>
+                          
 
                           <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
                             <div className="rounded-2xl bg-white border border-zinc-200 p-4 flex items-center justify-between">
@@ -531,14 +748,16 @@ export default function ProfilePage() {
                           <label className="text-sm font-semibold text-zinc-800">Currency</label>
                           <select
                             value={settings.currency ?? "USD"}
-                            onChange={(e) => setSettings((s) => ({ ...s, currency: e.target.value }))}
+                            onChange={(e) =>
+                              setSettings((s) => ({
+                                ...s,
+                                currency: e.target.value === "KHR" ? "KHR" : "USD",
+                              }))
+                            }
                             className="mt-2 h-11 w-full rounded-xl border border-zinc-200 bg-white px-4 text-sm outline-none focus:ring-2 focus:ring-zinc-900/15"
                           >
                             <option value="USD">USD ($)</option>
                             <option value="KHR">KHR (៛)</option>
-                            <option value="THB">THB (฿)</option>
-                            <option value="JPY">JPY (¥)</option>
-                            <option value="EUR">EUR (€)</option>
                           </select>
                         </div>
 
@@ -546,12 +765,16 @@ export default function ProfilePage() {
                           <label className="text-sm font-semibold text-zinc-800">Language</label>
                           <select
                             value={settings.language ?? "en"}
-                            onChange={(e) => setSettings((s) => ({ ...s, language: e.target.value }))}
+                            onChange={(e) =>
+                              setSettings((s) => ({
+                                ...s,
+                                language: e.target.value === "km" ? "km" : "en",
+                              }))
+                            }
                             className="mt-2 h-11 w-full rounded-xl border border-zinc-200 bg-white px-4 text-sm outline-none focus:ring-2 focus:ring-zinc-900/15"
                           >
-                            <option value="en">English</option>
-                            <option value="km">Khmer</option>
-                            <option value="ja">Japanese</option>
+                            <option value="en">{translateAppLabel(currentLanguage, "english")}</option>
+                            <option value="km">{translateAppLabel(currentLanguage, "khmer")}</option>
                           </select>
                         </div>
 
@@ -568,7 +791,7 @@ export default function ProfilePage() {
                                   : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
                               )}
                             >
-                              Light
+                              {translateAppLabel(currentLanguage, "light")}
                             </button>
                             <button
                               type="button"
@@ -580,11 +803,11 @@ export default function ProfilePage() {
                                   : "border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50"
                               )}
                             >
-                              Dark
+                              {translateAppLabel(currentLanguage, "dark")}
                             </button>
                           </div>
                           <p className="mt-2 text-xs text-zinc-500">
-                            (This setting can be used later to change your whole app theme.)
+                            Save this section to apply dark mode, currency conversion, and language across the app.
                           </p>
                         </div>
                       </div>
@@ -652,7 +875,7 @@ export default function ProfilePage() {
                               const { error } = await supabase.auth.resetPasswordForEmail(email, {
                                 redirectTo:
                                   typeof window !== "undefined"
-                                    ? `${window.location.origin}/reset-password`
+                                    ? `${window.location.origin}/Setnew_Password`
                                     : undefined,
                               });
                               if (error) return alert(error.message);
@@ -664,12 +887,7 @@ export default function ProfilePage() {
                           </button>
                         </div>
 
-                        <div className="rounded-2xl border border-red-200 bg-red-50 p-4">
-                          <p className="text-sm font-semibold text-red-700">Danger Zone</p>
-                          <p className="mt-1 text-xs text-red-700/80">
-                            Account delete requires backend function (we’ll add later).
-                          </p>
-                        </div>
+                        
                       </div>
                     </div>
                   ) : null}
@@ -721,3 +939,4 @@ export default function ProfilePage() {
     </div>
   );
 }
+

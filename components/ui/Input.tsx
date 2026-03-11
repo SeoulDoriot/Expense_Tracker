@@ -1,12 +1,18 @@
+import type { InputHTMLAttributes, ReactNode } from "react";
+
+type InputProps = InputHTMLAttributes<HTMLInputElement> & {
+  rightIcon?: ReactNode;
+};
+
 export default function Input({
   rightIcon,
   ...props
-}: any) {
+}: InputProps) {
   return (
     <div className="relative">
       <input
         {...props}
-        className="h-12 w-full rounded-xl border border-zinc-300 px-4 text-sm text-black outline-none"
+        className="h-14 w-full rounded-full border border-zinc-200 bg-white px-6 text-sm text-zinc-900 outline-none transition focus:border-[#F4C9A6] focus:ring-4 focus:ring-[#F4C9A6]/20"
       />
 
       {rightIcon && (
