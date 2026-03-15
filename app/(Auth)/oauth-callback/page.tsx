@@ -2,7 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AUTH_ROUTES, clearSocialAuthIntent } from "@/src/lib/authFlow";
+import type { User } from "@supabase/supabase-js";
+import {
+  AUTH_ROUTES,
+  clearSocialAuthIntent,
+  readSocialAuthIntent,
+} from "@/src/lib/authFlow";
 import { toFriendlyAuthMessage } from "@/src/lib/authMessages";
 import { getSupabaseBrowserClient } from "@/src/lib/supabaseBrowser";
 
@@ -25,6 +30,51 @@ function getTokensFromHash() {
   }
 
   return { access_token, refresh_token };
+}
+
+function hasEmailPasswordIdentity(user: User | null | undefined) {
+  const providers = new Set<string>();
+
+  user?.identities?.forEach((identity) => {
+    if (identity.provider) {
+      providers.add(identity.provider);
+    }
+  });
+
+  user?.app_metadata?.providers?.forEach((provider) => {
+    if (typeof provider === "string") {
+      providers.add(provider);
+    }
+  });
+
+  return providers.has("email");
+}
+
+function isFreshOAuthSignup(user: User | null | undefined) {
+  if (!user?.created_at || !user?.last_sign_in_at) {
+    return false;
+  }
+
+  const createdAt = Date.parse(user.created_at);
+  const lastSignInAt = Date.parse(user.last_sign_in_at);
+
+  if (Number.isNaN(createdAt) || Number.isNaN(lastSignInAt)) {
+    return false;
+  }
+
+  return Math.abs(lastSignInAt - createdAt) <= 60_000;
+}
+
+function resolvePostOAuthRoute(user: User | null | undefined) {
+  const intent = readSocialAuthIntent();
+  const needsPasswordSetup =
+    intent === "signup" && (isFreshOAuthSignup(user) || !hasEmailPasswordIdentity(user));
+
+  if (needsPasswordSetup) {
+    return `${AUTH_ROUTES.updatePassword}?mode=social-signup`;
+  }
+
+  return AUTH_ROUTES.dashboard;
 }
 
 export default function OAuthCallbackPage() {
@@ -55,13 +105,18 @@ export default function OAuthCallbackPage() {
       }, 500);
     }
 
+    function completeSignIn(user: User | null | undefined) {
+      const nextRoute = resolvePostOAuthRoute(user);
+      clearSocialAuthIntent();
+      router.replace(nextRoute);
+    }
+
     const { data: authListener } = client.auth.onAuthStateChange((_event, session) => {
       if (!active || !session) {
         return;
       }
 
-      clearSocialAuthIntent();
-      router.replace(AUTH_ROUTES.dashboard);
+      completeSignIn(session.user);
     });
 
     async function finishOAuth() {
@@ -79,36 +134,35 @@ export default function OAuthCallbackPage() {
       if (code) {
         setMessage("Confirming your Google sign-in...");
 
-        const { error } = await client.auth.exchangeCodeForSession(code);
+        const exchange = await client.auth.exchangeCodeForSession(code);
         if (!active) {
           return;
         }
 
-        if (error) {
-          redirectToLogin(toFriendlyAuthMessage(error.message));
+        if (exchange.error) {
+          redirectToLogin(toFriendlyAuthMessage(exchange.error.message));
           return;
         }
 
-        clearSocialAuthIntent();
-        router.replace(AUTH_ROUTES.dashboard);
+        const user = exchange.data.session?.user;
+        completeSignIn(user);
         return;
       }
 
       if (tokens) {
         setMessage("Restoring your session...");
 
-        const { error } = await client.auth.setSession(tokens);
+        const sessionResult = await client.auth.setSession(tokens);
         if (!active) {
           return;
         }
 
-        if (error) {
-          redirectToLogin(toFriendlyAuthMessage(error.message));
+        if (sessionResult.error) {
+          redirectToLogin(toFriendlyAuthMessage(sessionResult.error.message));
           return;
         }
 
-        clearSocialAuthIntent();
-        router.replace(AUTH_ROUTES.dashboard);
+        completeSignIn(sessionResult.data.user ?? sessionResult.data.session?.user);
         return;
       }
 
@@ -123,8 +177,7 @@ export default function OAuthCallbackPage() {
       }
 
       if (data.session) {
-        clearSocialAuthIntent();
-        router.replace(AUTH_ROUTES.dashboard);
+        completeSignIn(data.session.user);
         return;
       }
 
@@ -137,8 +190,7 @@ export default function OAuthCallbackPage() {
         }
 
         if (retry.data.session) {
-          clearSocialAuthIntent();
-          router.replace(AUTH_ROUTES.dashboard);
+          completeSignIn(retry.data.session.user);
           return;
         }
 

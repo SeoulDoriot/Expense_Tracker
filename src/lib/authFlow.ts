@@ -3,6 +3,7 @@ export const AUTH_ROUTES = {
   emailContinue: "/OTP_Request",
   login: "/Log_in",
   signup: "/Sign_up",
+  updatePassword: "/Update_Password",
   forgotPassword: "/Forgot_Password",
   setNewPassword: "/Setnew_Password",
   otpVerify: "/otp-verify",

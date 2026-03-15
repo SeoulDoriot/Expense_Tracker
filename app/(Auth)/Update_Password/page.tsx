@@ -2,144 +2,166 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import AuthStudentIllustration from "@/components/auth/AuthStudentIllustration";
-import { supabase } from "@/src/lib/supabaseClient";
+import { AUTH_ROUTES } from "@/src/lib/authFlow";
+import { getSupabaseBrowserClient } from "@/src/lib/supabaseBrowser";
+import { toFriendlyAuthMessage } from "@/src/lib/authMessages";
+
+type PasswordMode = "social-signup" | "account";
+
+function getPageCopy(mode: PasswordMode) {
+  if (mode === "social-signup") {
+    return {
+      title: "Create your password",
+      subtitle:
+        "Your Google account is ready. Add a password now so you can log in with either Google or email/password later.",
+      button: "Save password and continue",
+      success: "Password saved. Redirecting to your dashboard...",
+    };
+  }
+
+  return {
+    title: "Update password",
+    subtitle:
+      "Set or change your password while you are signed in. You can still keep using Google too.",
+    button: "Update password",
+    success: "Password updated. Redirecting to your dashboard...",
+  };
+}
 
 export default function UpdatePasswordPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const mode = (searchParams.get("mode") === "social-signup" ? "social-signup" : "account") as PasswordMode;
+  const copy = useMemo(() => getPageCopy(mode), [mode]);
 
-  const [email, setEmail] = useState<string>("");
-  const [password, setPassword] = useState<string>("");
-  const [confirmPassword, setConfirmPassword] = useState<string>("");
-  const [loading, setLoading] = useState<boolean>(false);
-  const [message, setMessage] = useState<string>("");
-  const [ready, setReady] = useState<boolean>(false);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [ready, setReady] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
 
-  // When user clicks Supabase reset link, Supabase usually opens a recovery session.
-  // We check session here to know if the link is valid.
   useEffect(() => {
     let alive = true;
 
-    (async () => {
-      const { data, error } = await supabase.auth.getSession();
-
-      if (!alive) return;
-
-      if (error) {
-        setMessage(error.message);
-        setReady(true);
+    async function loadSession() {
+      const supabase = getSupabaseBrowserClient();
+      if (!supabase) {
+        if (alive) {
+          setReady(false);
+          setMessage("Supabase keys are missing. Please configure your environment variables.");
+        }
         return;
       }
 
-      const session = data.session;
-      setEmail(session?.user?.email ?? "");
-      setReady(true);
-
-      if (!session) {
-        setMessage(
-          "Session missing. Please open the reset link from your email again (it may have expired)."
-        );
+      const sessionResult = await supabase.auth.getSession();
+      if (!alive) {
+        return;
       }
-    })();
+
+      if (sessionResult.error) {
+        setReady(false);
+        setMessage(toFriendlyAuthMessage(sessionResult.error.message));
+        return;
+      }
+
+      const user = sessionResult.data.session?.user;
+      if (!user) {
+        setReady(false);
+        setMessage("Please sign in first, or use Forgot Password if you already have an account.");
+        return;
+      }
+
+      setEmail(user.email ?? "");
+      setReady(true);
+      setMessage("");
+    }
+
+    void loadSession();
 
     return () => {
       alive = false;
     };
   }, []);
 
-  const canSubmit = useMemo(() => {
-    if (!ready) return false;
-    if (!password || !confirmPassword) return false;
-    if (password.length < 6) return false;
-    if (password !== confirmPassword) return false;
-    return true;
-  }, [ready, password, confirmPassword]);
+  const canSubmit =
+    ready &&
+    !loading &&
+    password.length >= 6 &&
+    confirmPassword.length >= 6 &&
+    password === confirmPassword;
 
   async function handleUpdatePassword() {
-    setMessage("");
+    if (!canSubmit) {
+      if (password.length < 6) {
+        setMessage("Password must be at least 6 characters.");
+        return;
+      }
 
-    if (password.length < 6) {
-      setMessage("Password must be at least 6 characters.");
+      if (password !== confirmPassword) {
+        setMessage("Passwords do not match.");
+      }
       return;
     }
-    if (password !== confirmPassword) {
-      setMessage("Passwords do not match.");
+
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase) {
+      setMessage("Supabase keys are missing. Please configure your environment variables.");
       return;
     }
 
     setLoading(true);
-
-    // Must still have recovery session
-    const { data: sessionData } = await supabase.auth.getSession();
-    if (!sessionData.session) {
-      setMessage(
-        "Session missing. Please open the reset link from your email again (it may have expired)."
-      );
-      setLoading(false);
-      return;
-    }
+    setMessage("");
 
     const { error } = await supabase.auth.updateUser({ password });
-
     if (error) {
-      setMessage(error.message);
       setLoading(false);
+      setMessage(toFriendlyAuthMessage(error.message));
       return;
     }
 
-    setMessage("Password updated successfully. Redirecting to login...");
-
-    // Optional: sign out recovery session so user logs in normally
-    await supabase.auth.signOut();
-
     setLoading(false);
-
-    // Go to your login page route
-    router.push("/Log_in");
+    setMessage(copy.success);
+    window.setTimeout(() => router.replace(AUTH_ROUTES.dashboard), 700);
   }
 
   return (
     <div className="min-h-screen bg-transparent">
       <main className="mx-auto flex min-h-[80vh] max-w-6xl items-center justify-center px-6 py-16 md:px-20">
         <div className="grid w-full grid-cols-1 items-center gap-16 lg:grid-cols-2">
-          {/* Left Card */}
           <section className="flex justify-center lg:justify-start">
             <div className="auth-panel auth-delay-1 surface-card flex w-full max-w-[520px] min-h-[560px] flex-col rounded-3xl px-10 py-14 md:px-12">
-              <h1 className="text-center text-4xl font-semibold text-zinc-900">
-                Set new password
-              </h1>
+              <h1 className="text-center text-4xl font-semibold text-zinc-900">{copy.title}</h1>
 
               <div className="mt-5 text-center text-sm text-zinc-400">
+                <p>{copy.subtitle}</p>
                 {email ? (
-                  <>
-                    For: <span className="font-medium text-zinc-700">{email}</span>
-                  </>
-                ) : (
-                  "Create a new password for your account."
-                )}
+                  <p className="mt-2">
+                    Signed in as <span className="font-medium text-zinc-700">{email}</span>
+                  </p>
+                ) : null}
               </div>
 
               <div className="mt-10 space-y-4">
-                {/* New password */}
                 <div className="space-y-2">
                   <p className="text-xs font-medium text-zinc-600">New password</p>
                   <input
                     value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Enter new password"
+                    onChange={(event) => setPassword(event.target.value)}
+                    placeholder="Enter a password"
                     type="password"
                     className="h-12 w-full rounded-full border border-zinc-200 bg-white px-5 text-sm text-zinc-900 outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10"
                   />
                 </div>
 
-                {/* Confirm password */}
                 <div className="space-y-2">
                   <p className="text-xs font-medium text-zinc-600">Confirm password</p>
                   <input
                     value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    placeholder="Confirm new password"
+                    onChange={(event) => setConfirmPassword(event.target.value)}
+                    placeholder="Confirm your password"
                     type="password"
                     className="h-12 w-full rounded-full border border-zinc-200 bg-white px-5 text-sm text-zinc-900 outline-none transition focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10"
                   />
@@ -148,40 +170,50 @@ export default function UpdatePasswordPage() {
                 <button
                   type="button"
                   onClick={handleUpdatePassword}
-                  disabled={!canSubmit || loading}
+                  disabled={!ready || loading}
                   className="mt-3 h-11 w-full rounded-full bg-zinc-900 text-sm font-semibold text-white shadow-sm transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {loading ? "Updating..." : "Update password"}
+                  {loading ? "Saving..." : copy.button}
                 </button>
 
-                {message && (
+                {message ? (
                   <p
                     className={`mt-3 text-center text-sm ${
-                      message.toLowerCase().includes("success") ||
-                      message.toLowerCase().includes("redirecting")
+                      message.toLowerCase().includes("redirecting") ||
+                      message.toLowerCase().includes("updated") ||
+                      message.toLowerCase().includes("saved")
                         ? "text-emerald-600"
                         : "text-red-500"
                     }`}
                   >
                     {message}
                   </p>
-                )}
+                ) : null}
 
                 <div className="mt-8 flex items-center justify-center gap-2 text-xs text-zinc-400">
-                  <span>Back to</span>
+                  <span>Need another option?</span>
                   <Link
-                    href="/Log_in"
+                    href={AUTH_ROUTES.emailContinue}
                     className="font-semibold underline underline-offset-2 hover:text-zinc-600"
                   >
-                    Log in
+                    Continue with email code
+                  </Link>
+                </div>
+
+                <div className="mt-2 flex items-center justify-center gap-2 text-xs text-zinc-400">
+                  <span>Forgot the password later?</span>
+                  <Link
+                    href={AUTH_ROUTES.forgotPassword}
+                    className="font-semibold underline underline-offset-2 hover:text-zinc-600"
+                  >
+                    Reset it here
                   </Link>
                 </div>
               </div>
             </div>
           </section>
 
-          {/* Right Illustration (same style as your OTP page) */}
-          <AuthStudentIllustration alt="Student confirming an updated password" />
+          <AuthStudentIllustration alt="Student setting a password for account access" />
         </div>
       </main>
     </div>

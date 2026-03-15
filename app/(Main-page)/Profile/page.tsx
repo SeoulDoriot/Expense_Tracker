@@ -8,6 +8,7 @@ import {
   type AppSettings,
   writeAppPreferences,
 } from "@/src/lib/appPreferences";
+import { AUTH_ROUTES } from "@/src/lib/authFlow";
 import { writeProfileDisplay } from "@/src/lib/profileDisplay";
 import { supabase } from "@/src/lib/supabaseClient";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -864,6 +865,21 @@ export default function ProfilePage() {
 
                       <div className="mt-5 space-y-4">
                         <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                          <p className="text-sm font-semibold text-zinc-900">Create or Change Password</p>
+                          <p className="mt-1 text-xs text-zinc-500">
+                            Add a password to this account so you can log in with Google or with email/password.
+                          </p>
+
+                          <button
+                            type="button"
+                            onClick={() => router.push(`${AUTH_ROUTES.updatePassword}?mode=account`)}
+                            className="mt-3 h-10 rounded-xl bg-zinc-900 px-4 text-sm font-semibold text-white hover:bg-zinc-800 transition"
+                          >
+                            Manage password
+                          </button>
+                        </div>
+
+                        <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
                           <p className="text-sm font-semibold text-zinc-900">Reset Password</p>
                           <p className="mt-1 text-xs text-zinc-500">
                             This will send a reset password email.
@@ -940,4 +956,3 @@ export default function ProfilePage() {
     </div>
   );
 }
-

@@ -48,53 +48,23 @@ export default function HomePage() {
               Track expenses, manage bills, and grow your savings — all in one powerful platform.
             </p>
 
-            <div className="mt-8 flex flex-wrap items-center gap-4 se-motion se-fade-up se-d4">
-              <button
-                type="button"
-                onClick={() => void handleGoogleStart("login")}
-                disabled={socialIntentLoading !== null}
-                className="inline-flex h-12 items-center justify-center rounded-full bg-[#111827] px-6 text-sm font-semibold text-white transition hover:bg-[#1F2937] disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {socialIntentLoading === "login" ? "Redirecting..." : "Log in with Google"}
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleGoogleStart("signup")}
-                disabled={socialIntentLoading !== null}
-                className="inline-flex h-12 items-center justify-center rounded-full border border-zinc-200 bg-white px-6 text-sm font-semibold text-zinc-900 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {socialIntentLoading === "signup" ? "Redirecting..." : "Sign up with Google"}
-              </button>
-            </div>
+           
 
             {socialError ? (
               <p className="mt-4 max-w-xl text-sm text-red-500 se-motion se-fade-up se-d4">{socialError}</p>
             ) : null}
 
-            <div className="mt-4 flex flex-wrap items-center gap-4 se-motion se-fade-up se-d4">
-              <Link
-                href={AUTH_ROUTES.emailContinue}
-                className="inline-flex items-center text-sm font-semibold text-zinc-900 underline underline-offset-4"
-              >
-                Continue with email
-              </Link>
-              <Link
-                href={AUTH_ROUTES.signup}
-                className="inline-flex items-center text-sm font-semibold text-zinc-900 underline underline-offset-4"
-              >
-                Continue with email sign up
-              </Link>
-            </div>
+            
 
             <div className="mt-6 flex flex-wrap items-center gap-10 se-motion se-fade-up se-d4">
-              <a href="#" className="inline-flex items-center se-btn">
+              <a href={AUTH_ROUTES.login} className="inline-flex items-center text-sm font-semibold text-zinc-900 underline underline-offset-4">
                 <img
                   src="/google-download.png"
                   alt="Google Play"
                   className="h-10 w-auto transition hover:opacity-90 active:scale-[0.99]"
                 />
               </a>
-              <a href="#" className="inline-flex items-center se-btn">
+              <a  href={AUTH_ROUTES.signup} className="inline-flex items-center text-sm font-semibold text-zinc-900 underline underline-offset-4">
                 <img
                   src="/appstore-download.png"
                   alt="App Store"
